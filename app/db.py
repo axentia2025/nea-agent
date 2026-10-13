@@ -140,6 +140,16 @@ class PgStore(PgDispatchStore):
         )
         return row is not None
 
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        if not marcas:
+            return set()
+        rows = await self.pool.fetch(
+            "SELECT wa_message_id FROM processed_message"
+            " WHERE wa_message_id = ANY($1::text[])",
+            marcas,
+        )
+        return {r["wa_message_id"] for r in rows}
+
     # -------------------------------------------------------------- relay ---
 
     async def enqueue_relay(self, body: bytes, signature: str | None) -> int:

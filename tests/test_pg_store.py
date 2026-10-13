@@ -238,6 +238,15 @@ async def test_dedup_gana_solo_el_primero(store):
     assert await store.mark_processed("wamid.2") is True
 
 
+async def test_already_processed_consulta_sin_marcar(store):
+    await store.mark_processed("msg:org_a:msg_1")
+    vistas = await store.already_processed(["msg:org_a:msg_1", "msg:org_a:msg_2"])
+    assert vistas == {"msg:org_a:msg_1"}
+    # Consultar no marca: la segunda sigue siendo nueva.
+    assert await store.mark_processed("msg:org_a:msg_2") is True
+    assert await store.already_processed([]) == set()
+
+
 # ─────────────────────────────────────────────────────────────── relay ───
 
 

@@ -160,6 +160,35 @@ def _marcas(items: list[Any]) -> list[str]:
     return [str(w) for w in (getattr(m, "wa_message_id", None) for m in items) if w]
 
 
+def marca_de_leido(org_id: str, message_id: str) -> str:
+    """La marca de un mensaje del CRM que ya entró al historial de Nea.
+
+    Con la organización dentro: una Nea atiende a varios negocios, y el id de
+    un mensaje es de SU CRM. El prefijo la separa de las marcas del webhook
+    (el wamid pelón) y de las de despacho (`dsp:`).
+    """
+    return f"msg:{org_id}:{message_id}"
+
+
+async def _anotar_leidos(ctx: AppContext, inbound: list[Any]) -> None:
+    """Deja dicho qué mensajes del CRM ya leyó Nea (solo en modo cloud).
+
+    El CRM puede entregar el mismo mensaje en DOS despachos: lo que el cliente
+    escribe mientras uno va en vuelo sale en otro, con otro `dispatchId`, que
+    repite la ráfaga. El dedup por despacho no lo ve, y el mensaje repetido
+    entraba otra vez al historial.
+
+    Se anota AQUÍ, cuando el mensaje entra al historial, y no al recibir el
+    despacho: un turno que un gate calló (IA apagada, ventana cerrada) no leyó
+    nada, y si el CRM vuelve a mandar esos mensajes hay que leerlos.
+    """
+    if not ctx.settings.cloud_mode:
+        return
+    org_id = (ctx.organizacion or ("", ""))[0]
+    for marca in _marcas(inbound):
+        await ctx.store.mark_processed(marca_de_leido(org_id, marca))
+
+
 def _fusionar(viejos: list[Any], nuevos: list[Any]) -> list[Any]:
     """La ráfaga que esperaba y la nueva, en orden y sin repetir un wamid."""
     vistos: set[str] = set()
@@ -584,6 +613,7 @@ async def run_turn(
     await ctx.store.add_message(
         conv.id, "user", user_text, wa_message_id=inbound[0].wa_message_id
     )
+    await _anotar_leidos(ctx, inbound)
 
     # --- Armar mensajes para el LLM ---------------------------------------
     # ¿El CRM agenda HOY? La respuesta caduca (app/agenda.py): si venció, este
