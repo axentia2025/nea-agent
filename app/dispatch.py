@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse
 from app.multiorg import organizacion_del_despacho
 from app.http_limits import limited_body
 from app.state import AppContext, InboundMessage
-from app.turn import conversation_lock, handle_flush
+from app.turn import conversation_lock, handle_flush, marca_de_leido
 
 logger = logging.getLogger("nea.dispatch")
 
@@ -219,14 +219,40 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
         return
     identity = mensajes[0].identity
 
-    # Dedup por despacho, no por mensaje: el CRM reintenta el DESPACHO entero
-    # cuando no le acusamos recibo, y contar sus mensajes uno por uno dejaría
-    # pasar el segundo intento con la mitad de la ráfaga ya marcada.
+    # Dedup por despacho: el CRM reintenta el DESPACHO entero cuando no le
+    # acusamos recibo. Marcar aquí sus mensajes uno por uno dejaría pasar el
+    # segundo intento con la mitad de la ráfaga ya marcada.
     if dispatch_id and not durable:
         fresco = await ctx.store.mark_processed(f"dsp:{dispatch_id}")
         if not fresco:
             logger.info("dedup: despacho %s ya procesado — ignorado", dispatch_id)
             return
+
+    # Y por mensaje, que es lo que pide el contrato: un mensaje puede venir en
+    # DOS despachos distintos. El segundo trae la ráfaga completa, así que
+    # repite lo que Nea ya leyó. Lo leído lo anota el turno al guardarlo en su
+    # historial (`_anotar_leidos`); aquí solo se consulta.
+    org = organizacion_del_despacho(payload) if ctx.settings.multi_org else None
+    org_id = org[0] if org else ""
+    leidos = await ctx.store.already_processed(
+        [marca_de_leido(org_id, m.wa_message_id) for m in mensajes if m.wa_message_id]
+    )
+    if leidos:
+        nuevos = [
+            m
+            for m in mensajes
+            if not m.wa_message_id
+            or marca_de_leido(org_id, m.wa_message_id) not in leidos
+        ]
+        logger.info(
+            "dedup: despacho %s repite %d mensaje(s) que ya leí — quedan %d",
+            dispatch_id,
+            len(mensajes) - len(nuevos),
+            len(nuevos),
+        )
+        if not nuevos:
+            return
+        mensajes = nuevos
 
     if ctx.settings.multi_org:
         ctx_turno = await _contexto_multiorg(ctx, payload, identity, conversation_id)

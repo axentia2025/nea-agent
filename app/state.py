@@ -172,6 +172,10 @@ class Store(Protocol):
         """True si el mensaje es nuevo (gana el INSERT); False si ya se procesó."""
         ...
 
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        """Cuáles de estas marcas ya existen. Solo consulta: no marca nada."""
+        ...
+
     # cola de relay
     async def enqueue_relay(self, body: bytes, signature: str | None) -> int: ...
     async def due_relays(self, now: datetime) -> list[RelayItem]: ...
@@ -280,6 +284,9 @@ class MemoryStore(MemoryDispatchStore):
             return False
         self.processed.add(wa_message_id)
         return True
+
+    async def already_processed(self, marcas: list[str]) -> set[str]:
+        return {m for m in marcas if m in self.processed}
 
     async def enqueue_relay(self, body: bytes, signature: str | None) -> int:
         rid = next(self._ids)

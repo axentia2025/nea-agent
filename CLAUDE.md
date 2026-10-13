@@ -56,6 +56,12 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 - **La credencial derivada es un contrato con el otro repositorio.** La cadena
   `vocero:cerebro:v1` y el base64url sin relleno están fijados en pruebas a
   ambos lados; desviarse un byte da 401 mudo en todo.
+- **En cloud se deduplica por despacho Y por mensaje.** El `dispatchId` cubre
+  los reintentos del mismo despacho; `messages[].id` cubre el mensaje que el
+  CRM repite en un despacho distinto (la ráfaga completa viaja cada vez). El
+  id se anota cuando el mensaje ENTRA al historial (`_anotar_leidos`), no al
+  recibir el despacho: un turno que un gate calló no leyó nada, y si esos
+  mensajes vuelven hay que leerlos.
 - **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
 - **Un turno sin CRM se reintenta, y solo ese.** Si el gate 2 no alcanza al

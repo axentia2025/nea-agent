@@ -4,6 +4,19 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar
+
+### Arreglado
+
+- **Un mensaje del CRM se lee una sola vez, aunque venga en dos despachos.**
+  En modo cloud, el CRM entrega la ráfaga completa cada vez que despacha: si
+  el cliente escribe mientras un despacho va en vuelo o mientras Nea piensa,
+  el siguiente despacho —con otro `dispatchId`— repite los mensajes
+  anteriores. Nea deduplicaba solo por despacho y el repetido entraba otra vez
+  a su historial («hola», y luego «hola» + la pregunta nueva). Ahora anota
+  cada `messages[].id` cuando lo lee y descarta los que ya leyó; un despacho
+  que no trae nada nuevo no gasta turno. Sin migraciones ni variables nuevas.
+
 ## 1.1.0 — 2026-10-08
 
 Dos PR sobre 1.0.0: #36 y #38. Nada se rompe al actualizar.
