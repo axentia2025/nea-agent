@@ -31,7 +31,7 @@ from app.stall import (
     trae_contenido,
 )
 from app.profile import resolve_profile
-from app.prompt import build_system_prompt
+from app.prompt import build_system_prompt, zona_del_negocio
 from app.state import AppContext, InboundMessage, utcnow
 from app.tools import ToolRuntime, tool_schemas
 
@@ -623,6 +623,9 @@ async def run_turn(
     referral = next((m.referral_headline for m in inbound if m.referral_headline), None)
     offered = await ctx.store.get_offered_slots(conv.id)
     profile = await resolve_profile(ctx)
+    # La zona es la del negocio de ESTE turno (la manda el CRM), no la de la
+    # instancia: una Nea atiende a negocios de zonas distintas.
+    tz = zona_del_negocio(context, _agent_tz(settings))
     system = build_system_prompt(
         profile=profile,
         context=context,
@@ -630,7 +633,7 @@ async def run_turn(
         referral_headline=referral,
         offered=offered,
         agenda=ctx.agenda_enabled,
-        tz=_agent_tz(settings),
+        tz=tz,
         recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
     )
     # Se traen más mensajes de los que ve el LLM: el candado de cierre cuenta
@@ -680,7 +683,7 @@ async def run_turn(
         ]
 
     # --- LLM con tools ----------------------------------------------------
-    runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile)
+    runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile, tz=tz)
     try:
         final_text = await _tool_loop(ctx, messages, runtime)
     except LlmExhausted as exc:
@@ -763,7 +766,7 @@ async def run_turn(
         await _anotar_cierre(
             ctx,
             str(crm_conv_id),
-            cerrada_en.astimezone(_agent_tz(settings)).isoformat(timespec="minutes"),
+            cerrada_en.astimezone(tz).isoformat(timespec="minutes"),
             identity,
         )
 

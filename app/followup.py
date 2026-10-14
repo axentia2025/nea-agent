@@ -17,7 +17,7 @@ from app.crm import CrmConflict, CrmError
 from app.formato import a_whatsapp
 from app.llm import LlmExhausted
 from app.profile import resolve_profile
-from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt
+from app.prompt import FOLLOWUP_INSTRUCTION, build_system_prompt, zona_del_negocio
 from app.state import AppContext, Conversation, utcnow
 from app.multiorg import ctx_de_organizacion
 from app.turn import conversation_lock
@@ -150,7 +150,7 @@ class FollowupWorker:
             context=context,
             conv=conv,
             offered=[],
-            tz=_agent_tz(ctx.settings),
+            tz=zona_del_negocio(context, _agent_tz(ctx.settings)),
             recordatorios=bool(getattr(ctx.crm, "supports_agenda_v2", False)),
         )
         history = await ctx.store.recent_messages(

@@ -72,7 +72,9 @@ class Settings(BaseSettings):
 
     # Perfil del negocio (capa de persona; ver app/profile.py)
     agent_name: str = "Nea"  # se usa si el CRM no define nombre
-    agent_timezone: str = "America/Mexico_City"  # IANA; fechas del prompt
+    # IANA. Respaldo: la zona de cada negocio la manda el CRM con sus citas
+    # (`zona_del_negocio`); esta solo cuenta si el CRM no la dice.
+    agent_timezone: str = "America/Mexico_City"
     brief_path: str = ""  # markdown local, fallback si el CRM no tiene perfil
 
     # LLM

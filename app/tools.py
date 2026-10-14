@@ -360,7 +360,11 @@ def _slots_from_payload(
 
 
 def _zona_del_negocio(ctx: AppContext) -> ZoneInfo:
-    """La zona de AGENT_TIMEZONE (la del negocio), o CDMX si no es válida."""
+    """La zona de AGENT_TIMEZONE, o CDMX si no es válida.
+
+    Es el respaldo: el turno le pasa a `ToolRuntime` la zona que el CRM manda
+    para ese negocio (`zona_del_negocio`, app/prompt.py).
+    """
     try:
         return ZoneInfo(getattr(ctx.settings, "agent_timezone", "") or "America/Mexico_City")
     except Exception:
@@ -380,11 +384,13 @@ class ToolRuntime:
         conv: Conversation,
         crm_conversation_id: str,
         profile: BusinessProfile | None = None,
+        tz: ZoneInfo | None = None,
     ) -> None:
         self._ctx = ctx
         self._conv = conv
         self._crm_conv_id = crm_conversation_id
         self._profile = profile or BusinessProfile()
+        self._tz = tz or _zona_del_negocio(ctx)
         # Efectos observables por turn.py:
         self.handoff_reason: str | None = None  # se ejecuta DESPUÉS de la despedida
         self.booked = False
@@ -546,7 +552,7 @@ class ToolRuntime:
         que SÍ ve, dicho como lo que es (una parte), y el espejo queda igual
         que la oferta que el CRM acaba de registrar.
         """
-        tz = _zona_del_negocio(self._ctx)
+        tz = self._tz
         del_dia: list[OfferedSlot] = []
         otros: list[OfferedSlot] = []
         for crudo in raw[:MAX_OFFERED]:
