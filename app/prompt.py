@@ -22,6 +22,74 @@ from app.state import Conversation, OfferedSlot
 DEFAULT_TZ = ZoneInfo("America/Mexico_City")
 
 
+def zona_del_negocio(context: dict | None, respaldo: ZoneInfo | None = None) -> ZoneInfo:
+    """La zona horaria del NEGOCIO: la que el CRM manda con sus citas.
+
+    Una Nea atiende a muchos negocios y cada uno configura su zona en el CRM,
+    que es con la que calcula y etiqueta los horarios. En producción (AIMA, 13
+    oct 2026) el prompt se armaba con la zona de la instancia —la de México—
+    para un negocio de Colombia, y el agente le dijo al lead «es de México el
+    huso» sobre unos horarios que eran de Bogotá.
+
+    `respaldo` (AGENT_TIMEZONE) solo cuenta cuando el CRM no la dice: uno sin
+    agenda, o de antes del bloque `booking`.
+    """
+    booking = (context or {}).get("booking")
+    nombre = booking.get("timezone") if isinstance(booking, dict) else None
+    if nombre:
+        try:
+            return ZoneInfo(str(nombre))
+        except Exception:
+            pass
+    return respaldo or DEFAULT_TZ
+
+
+# Cómo se le dice a una persona de dónde es la hora. Espejo de las zonas
+# frecuentes del CRM (Ajustes → Agenda); para las demás, la ciudad de la zona.
+HORA_DE_ZONA = {
+    "America/Mexico_City": "hora del centro de México",
+    "America/Cancun": "hora de Cancún",
+    "America/Mazatlan": "hora de Mazatlán",
+    "America/Hermosillo": "hora de Hermosillo",
+    "America/Tijuana": "hora de Tijuana",
+    "America/Guatemala": "hora de Guatemala",
+    "America/El_Salvador": "hora de El Salvador",
+    "America/Tegucigalpa": "hora de Honduras",
+    "America/Managua": "hora de Nicaragua",
+    "America/Costa_Rica": "hora de Costa Rica",
+    "America/Panama": "hora de Panamá",
+    "America/Bogota": "hora de Colombia",
+    "America/Guayaquil": "hora de Ecuador",
+    "America/Lima": "hora de Perú",
+    "America/Caracas": "hora de Venezuela",
+    "America/La_Paz": "hora de Bolivia",
+    "America/Santo_Domingo": "hora de República Dominicana",
+    "America/Puerto_Rico": "hora de Puerto Rico",
+    "America/Santiago": "hora de Chile",
+    "America/Argentina/Buenos_Aires": "hora de Argentina",
+    "America/Montevideo": "hora de Uruguay",
+    "America/Asuncion": "hora de Paraguay",
+    "America/Sao_Paulo": "hora de São Paulo",
+    "Europe/Madrid": "hora de España",
+    "Atlantic/Canary": "hora de Canarias",
+    "America/New_York": "hora de Nueva York",
+    "America/Chicago": "hora de Chicago",
+    "America/Denver": "hora de Denver",
+    "America/Los_Angeles": "hora de Los Ángeles",
+}
+
+
+def hora_de(tz: ZoneInfo) -> str:
+    """«hora de Colombia», «hora del centro de México»: la zona como se dice.
+
+    El nombre técnico no entra al prompt. Con «America/Bogota» a la vista, en
+    la autoprueba con el modelo real se le escapó tal cual al lead: «(la hora
+    del negocio, America/Bogota)».
+    """
+    ciudad = tz.key.rsplit("/", 1)[-1].replace("_", " ")
+    return HORA_DE_ZONA.get(tz.key) or f"hora de {ciudad}"
+
+
 def _chassis(profile: BusinessProfile) -> str:
     name = profile.agent_name
     text = f"""Eres {name}, el agente de IA de WhatsApp de este negocio. Atiendes a personas que escriben al número del negocio. Tu trabajo: entender qué necesita cada persona, calificarla según las instrucciones del negocio y AGENDAR una cita con el equipo cuando corresponda — o darle una salida digna cuando no.
@@ -178,7 +246,7 @@ def calendario(now: datetime, tz: ZoneInfo, dias: int = DIAS_CALENDARIO) -> str:
 
 def _fmt_local(dt: datetime, tz: ZoneInfo) -> str:
     local = dt.astimezone(tz)
-    return f"{fecha_es(dt, tz)}, {local:%H:%M} ({tz.key})"
+    return f"{fecha_es(dt, tz)}, {local:%H:%M} ({hora_de(tz)})"
 
 
 def _parse_instante(value: object) -> datetime | None:
@@ -321,7 +389,22 @@ def build_system_prompt(
             "prometas una cita. Resuelve lo que puedas y, cuando el lead "
             "quiera avanzar, haz handoff para que lo coordine una persona."
         )
-    lines.append(f"- Fecha y hora: {_fmt_local(now, tz)}.")
+    lines.append(f"- Fecha y hora del negocio: {_fmt_local(now, tz)}.")
+    if agenda:
+        # Con solo «(America/Mexico_City)» junto a la hora, el modelo dedujo
+        # de dónde eran los horarios y lo soltó sin que nadie preguntara
+        # (AIMA, 13 oct 2026). Y en la autoprueba, con permiso para convertir,
+        # convirtió mal: «las 14:00 de México son las 22:00 de Madrid»
+        # (eran las 14:00 de Bogotá: las 21:00 en Madrid).
+        lines.append(
+            "- Los horarios de la agenda van en esa hora, la del negocio, y así "
+            "se dicen: tal cual, sin aclarar de dónde son. No supongas en qué "
+            "país u hora está el lead. Solo si pregunta de dónde es la hora, o "
+            f"cuenta que está en otro lugar, dile que es la {hora_de(tz)} y NO "
+            "le calcules cuánto sería en su hora ni cuántas horas de diferencia "
+            "hay: esa cuenta falla con los cambios de horario. Que la revise él "
+            "contra su reloj."
+        )
     # "Mañana" resuelto por el sistema: el lead lo dice todo el tiempo y el
     # modelo no tiene por qué calcularlo (ni equivocarse de día).
     lines.append(

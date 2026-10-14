@@ -8,6 +8,18 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 
 ### Arreglado
 
+- **La hora que ve el agente es la del negocio que atiende, no la de la
+  instancia.** Una Nea en modo cloud atiende a negocios de zonas distintas,
+  pero armaba el prompt con `AGENT_TIMEZONE` (la de México) para todos. Los
+  horarios los calcula el CRM en la zona de cada negocio, así que la agenda
+  estaba bien; lo que fallaba era lo que el agente decía de ella: a un lead de
+  un negocio en Colombia le dijo «es de México el huso». Ahora la zona sale
+  del bloque `booking` del contexto (la de Ajustes → Agenda) para el prompt,
+  el seguimiento y las herramientas; «hoy», «mañana» y el calendario también
+  son los del negocio. El prompt la nombra como lugar («hora de Colombia»),
+  nunca con su nombre técnico, y el agente no le calcula al lead la
+  diferencia con su hora. `AGENT_TIMEZONE` queda de respaldo para un CRM que
+  no mande la zona. Sin migraciones ni variables nuevas.
 - **Un mensaje del CRM se lee una sola vez, aunque venga en dos despachos.**
   En modo cloud, el CRM entrega la ráfaga completa cada vez que despacha: si
   el cliente escribe mientras un despacho va en vuelo o mientras Nea piensa,
