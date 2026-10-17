@@ -25,6 +25,7 @@ from app.crm import (
     SlotNotOffered,
     SlotTaken,
 )
+from app.dias import nombra_un_dia
 from app.profile import BusinessProfile
 from app.state import AppContext, Conversation, OfferedSlot
 
@@ -94,9 +95,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     "fecha": {
                         "type": "string",
                         "description": (
-                            "Opcional. Día concreto en AAAA-MM-DD, calculado con "
-                            "la fecha de hoy del contexto (\"el jueves de la "
-                            "próxima semana\" → su fecha)."
+                            "Opcional, y SOLO si el lead nombró un día (\"el "
+                            "jueves\", \"mañana\", \"el 20\"). En AAAA-MM-DD, "
+                            "calculado con la fecha de hoy del contexto (\"el "
+                            "jueves de la próxima semana\" → su fecha). Si solo "
+                            "pregunta cuándo se puede, va SIN fecha: el reparto "
+                            "ya empieza hoy."
                         ),
                     }
                 },
@@ -385,8 +389,12 @@ class ToolRuntime:
         crm_conversation_id: str,
         profile: BusinessProfile | None = None,
         tz: ZoneInfo | None = None,
+        conversacion_reciente: str | None = None,
     ) -> None:
         self._ctx = ctx
+        # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
+        # se sabe, y la fecha del modelo pasa sin revisar.
+        self._conversacion_reciente = conversacion_reciente
         self._conv = conv
         self._crm_conv_id = crm_conversation_id
         self._profile = profile or BusinessProfile()
@@ -448,6 +456,19 @@ class ToolRuntime:
                 "error": "fecha_invalida",
                 "detalle": "fecha va como AAAA-MM-DD (p. ej. 2026-09-17); vuelve a llamar",
             }
+        fecha_ignorada: str | None = None
+        if (
+            fecha
+            and self._conversacion_reciente is not None
+            and not nombra_un_dia(self._conversacion_reciente)
+        ):
+            # Nadie nombró un día: el reparto empieza hoy. Ver app/dias.py.
+            logger.info(
+                "tools: propose_slots con fecha=%s sin que el lead nombrara un "
+                "día — consulto el reparto",
+                fecha,
+            )
+            fecha_ignorada, fecha = fecha, None
         # La conversación va SIEMPRE: es contra ella que el CRM registra la
         # oferta, y sin ella no hay nada reservable después.
         try:
@@ -473,7 +494,7 @@ class ToolRuntime:
             }
         await self._ctx.store.replace_offered_slots(self._conv.id, slots)
         self.proposed = True
-        return {
+        resultado = {
             "ok": True,
             "slots": _slots_for_llm(slots),
             "dias_con_agenda": sorted(
@@ -481,6 +502,14 @@ class ToolRuntime:
             ),
             **_cobertura(query),
         }
+        if fecha_ignorada:
+            resultado["fecha_no_consultada"] = fecha_ignorada
+            resultado["instrucciones"] = (
+                f"No consulté el {fecha_ignorada}: el lead no pidió un día. Este "
+                "es el reparto desde HOY. Ofrécele los más próximos, empezando "
+                "por hoy si hay. " + resultado["instrucciones"]
+            )
+        return resultado
 
     async def _huecos_del_dia(
         self, fecha: str, raw: list[dict[str, Any]], query: dict[str, Any] | None

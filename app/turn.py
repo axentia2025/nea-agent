@@ -32,7 +32,7 @@ from app.stall import (
 )
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt, zona_del_negocio
-from app.state import AppContext, InboundMessage, utcnow
+from app.state import AppContext, BotMessage, InboundMessage, utcnow
 from app.tools import ToolRuntime, tool_schemas
 
 logger = logging.getLogger("nea.turn")
@@ -683,7 +683,14 @@ async def run_turn(
         ]
 
     # --- LLM con tools ----------------------------------------------------
-    runtime = ToolRuntime(ctx, conv, str(crm_conv_id), profile=profile, tz=tz)
+    runtime = ToolRuntime(
+        ctx,
+        conv,
+        str(crm_conv_id),
+        profile=profile,
+        tz=tz,
+        conversacion_reciente=_conversacion_reciente(history),
+    )
     try:
         final_text = await _tool_loop(ctx, messages, runtime)
     except LlmExhausted as exc:
@@ -1099,3 +1106,14 @@ async def _safe_handoff(
     # Queda anotado para que la red de seguridad no registre otro encima.
     if turno is not None:
         turno.handoff = reason
+
+
+def _conversacion_reciente(history: list[BotMessage]) -> str:
+    """Lo que cuenta para saber si alguien nombró un día (app/dias.py).
+
+    Los últimos mensajes del lead, y lo último que dijo Nea: si ella preguntó
+    «¿te late el jueves?» y el lead contestó «sí», el jueves ya está pedido.
+    """
+    del_lead = [m.content for m in history if m.role == "user"][-3:]
+    de_nea = [m.content for m in history if m.role == "assistant"][-1:]
+    return "\n".join(str(t) for t in de_nea + del_lead)
