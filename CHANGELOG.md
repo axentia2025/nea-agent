@@ -42,6 +42,11 @@ desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
   `conversation.test: true` es una corrida del Laboratorio: pasa aunque la
   identidad (sintética) no esté en `ALLOWED_WA_IDS` y no programa seguimiento.
   La respuesta la guarda el CRM sin enviarla.
+- **Roles como datos** (vocero-crm 034). El perfil del CRM trae `role` y
+  `tools`: Nea le enseña al modelo solo las herramientas encendidas (ficha,
+  agendar, reprogramar, salida; escalar va siempre). Sin «agendar», se porta
+  como contra un CRM sin agenda. El cambio llega cuando Nea relee el perfil
+  (cada 5 minutos), sin redesplegar. Sin `tools`, todas, como antes.
 
 ### Se quitó
 

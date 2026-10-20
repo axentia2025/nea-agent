@@ -48,6 +48,16 @@ class BusinessProfile:
     greeting: str | None = None
     kb_text: str | None = None
     resources: list[dict[str, str]] = field(default_factory=list)
+    # 034 — El rol y las herramientas encendidas (claves del catálogo del CRM:
+    # ficha, agendar, reprogramar, salida, escalar). `None` = todas, como un
+    # CRM que todavía no las manda.
+    role: str = "calificador"
+    tools: frozenset[str] | None = None
+
+    def permite(self, clave: str) -> bool:
+        """¿Está encendida esta herramienta? `escalar` siempre lo está: es la
+        red de seguridad (quien pide una persona, la hostilidad)."""
+        return self.tools is None or clave == "escalar" or clave in self.tools
 
     @property
     def has_knowledge(self) -> bool:
@@ -76,7 +86,16 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         greeting=prof.get("greeting") or None,
         kb_text=kb_text,
         resources=resources,
+        role=str(prof.get("role") or "calificador"),
+        tools=_herramientas(prof.get("tools")),
     )
+
+
+def _herramientas(valor: Any) -> frozenset[str] | None:
+    """Las claves que manda el CRM; sin lista (un CRM viejo), todas."""
+    if not isinstance(valor, list):
+        return None
+    return frozenset(str(v) for v in valor if isinstance(v, str))
 
 
 def profile_from_brief(path: Path, default_name: str) -> BusinessProfile | None:
