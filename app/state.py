@@ -136,6 +136,10 @@ class InboundMessage:
     # 031 — Por dónde escribe: whatsapp, instagram, messenger, tiktok… Lo
     # dice el despacho (`conversation.channel`); None si no lo dijo.
     channel: str | None = None
+    # 033 — Una conversación de prueba del Laboratorio (`conversation.test` del
+    # despacho). La respuesta la guarda el CRM sin enviarla; aquí no pasa por
+    # ALLOWED_WA_IDS (la identidad es sintética) ni programa seguimiento.
+    prueba: bool = False
 
 
 # --------------------------------------------------------------- contrato ---

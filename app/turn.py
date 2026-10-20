@@ -236,9 +236,14 @@ async def run_turn(
     turno = turno if turno is not None else _Turno()
     settings = ctx.settings
 
+    # 033 — Una conversación del Laboratorio: el CRM guarda la respuesta sin
+    # enviarla, así que la lista de permitidos (que protege a personas reales)
+    # no aplica, y no se programa seguimiento.
+    prueba = any(getattr(m, "prueba", False) for m in inbound)
+
     # --- Gate 1: allowlist de pruebas (Constitución V) --------------------
     allowed = settings.allowed_identities
-    if allowed and canonical_identity(identity) not in allowed:
+    if allowed and not prueba and canonical_identity(identity) not in allowed:
         logger.info(
             "allowlist: %s fuera de ALLOWED_WA_IDS — sin respuesta", identity
         )
@@ -502,7 +507,7 @@ async def run_turn(
     else:
         if runtime.proposed:
             updates["phase"] = "agendando"
-        if sent and not conv.followup_sent and not settings.cloud_mode:
+        if sent and not conv.followup_sent and not settings.cloud_mode and not prueba:
             updates["followup_due_at"] = utcnow() + timedelta(
                 hours=settings.followup_hours
             )

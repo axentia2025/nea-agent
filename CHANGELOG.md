@@ -38,6 +38,10 @@ desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
   raíz** (antes, solo en cloud).
 - `/health` gana `webhookDeMeta.ultimoEn`: cuándo le llegó a Nea un webhook de
   Meta, que desde la 2.0 ya no debería llegarle.
+- **El Laboratorio del CRM prueba a Nea** (vocero-crm 033). Un despacho con
+  `conversation.test: true` es una corrida del Laboratorio: pasa aunque la
+  identidad (sintética) no esté en `ALLOWED_WA_IDS` y no programa seguimiento.
+  La respuesta la guarda el CRM sin enviarla.
 
 ### Se quitó
 
