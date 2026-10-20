@@ -71,6 +71,8 @@ def mensajes_del_despacho(payload: dict[str, Any]) -> list[InboundMessage]:
     if not identity:
         return []
     canal = (payload.get("conversation") or {}).get("channel")
+    # Solo `true` literal: la llave falta en una conversación real.
+    prueba = (payload.get("conversation") or {}).get("test") is True
 
     out: list[InboundMessage] = []
     for m in payload.get("messages") or []:
@@ -96,6 +98,7 @@ def mensajes_del_despacho(payload: dict[str, Any]) -> list[InboundMessage]:
                 location=_ubicacion(m.get("location")),
                 contact_names=_nombres(m.get("contacts")),
                 channel=str(canal) if canal else None,
+                prueba=prueba,
             )
         )
     return out

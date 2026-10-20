@@ -221,3 +221,30 @@ async def test_las_variables_de_1x_avisan_al_arrancar(monkeypatch, caplog):
     assert "META_APP_SECRET" in texto and "CRM_WEBHOOK_URL" in texto
     assert "tok" not in texto  # el nombre de la variable, nunca su valor
     await asyncio.sleep(0)
+
+
+async def test_una_prueba_del_laboratorio_pasa_la_lista_y_no_programa_seguimiento(respx_mock):
+    """033 — `conversation.test`: la identidad es sintética y la respuesta no sale."""
+    ctx = make_ctx(make_settings(allowed_wa_ids="5215550009999"))
+    routes = mock_crm_basics(respx_mock)
+    async with _cliente(ctx) as client:
+        await despachar(client, ctx, esperar=True, text="hola", frm="5210000000001", prueba=True)
+    assert routes["messages"].call_count == 1
+    conv = next(iter(ctx.store.conversations.values()))
+    assert conv.followup_due_at is None
+    await ctx.crm.aclose()
+
+
+async def test_una_real_fuera_de_la_lista_sigue_sin_respuesta(respx_mock):
+    ctx = make_ctx(make_settings(allowed_wa_ids="5215550009999"))
+    routes = mock_crm_basics(respx_mock)
+    async with _cliente(ctx) as client:
+        await despachar(client, ctx, esperar=True, text="hola", frm="5210000000001")
+    assert routes["messages"].call_count == 0
+    await ctx.crm.aclose()
+
+
+async def test_test_que_no_es_true_literal_no_cuenta():
+    evento = evento_despacho(text="hola")
+    evento["conversation"]["test"] = "true"
+    assert mensajes_del_despacho(evento)[0].prueba is False

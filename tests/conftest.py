@@ -111,6 +111,7 @@ def evento_despacho(
     channel: str = "whatsapp",
     dispatch_id: str | None = None,
     mensajes: list[dict[str, Any]] | None = None,
+    prueba: bool = False,
 ) -> dict[str, Any]:
     """Un despacho de la raíz, con la forma y el orden de claves del CRM.
 
@@ -148,6 +149,7 @@ def evento_despacho(
             "aiEnabled": True,
             "windowOpen": True,
             "windowExpiresAt": "2026-10-20T05:10:03.000Z",
+            **({"test": True} if prueba else {}),
         },
         "contact": {"id": "ct_1", "displayName": "Lead de Prueba", "identity": frm},
         "messages": mensajes if mensajes is not None else [m],
