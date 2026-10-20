@@ -1,4 +1,4 @@
-"""Herramientas del LLM: update_ficha, propose_slots, book_session, route_out, handoff.
+"""Herramientas del LLM: update_ficha, move_stage, propose_slots, book_session, route_out, handoff.
 
 Solo se reserva lo que se ofreció, y **quien manda sobre eso es el CRM**:
 Vocero guarda la oferta contra la conversación y rechaza cualquier otro
@@ -197,6 +197,52 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 ]
 
 
+# 038 — Mover al lead de etapa. No va en TOOL_SCHEMAS: solo existe cuando el
+# contexto del turno trae `lead.nextStages` con algo (un CRM sin
+# `POST /api/bot/stage`, como cloud o un raíz anterior, no manda la llave), y
+# así el modelo no puede pedir una etapa que el CRM no le dio.
+MOVE_STAGE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "move_stage",
+        "description": (
+            "Avanza al lead en el pipeline del negocio cuando la conversación lo "
+            "amerita (por ejemplo, ya dijo qué busca y para cuándo). Solo a una "
+            "de las etapas que el contexto dice que puedes usar. Es interno: no "
+            "se lo anuncies al lead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "etapa": {
+                    "type": "string",
+                    "description": "Nombre de la etapa, tal cual aparece en el contexto",
+                }
+            },
+            "required": ["etapa"],
+        },
+    },
+}
+
+
+def etapas_siguientes(context: dict[str, Any] | None) -> list[str]:
+    """Los nombres de `lead.nextStages` del contexto (038); vacía si no vienen."""
+    lead = (context or {}).get("lead") or {}
+    crudas = lead.get("nextStages")
+    if not isinstance(crudas, list):
+        return []
+    return [
+        e["name"].strip()
+        for e in crudas
+        if isinstance(e, dict) and isinstance(e.get("name"), str) and e["name"].strip()
+    ]
+
+
+def con_mover_etapa(schemas: list[dict[str, Any]], etapas: list[str]) -> list[dict[str, Any]]:
+    """El catálogo del turno más `move_stage` si hay a dónde mover."""
+    return schemas + [MOVE_STAGE_SCHEMA] if etapas else schemas
+
+
 # Recordatorios de la cita: SOLO los manda la agenda v2 de Vocero Cloud. El
 # CRM raíz no tiene recordatorios, y con este campo obligatorio en su
 # book_session el modelo, para llenarlo, le preguntaba al lead «¿te mando un
@@ -223,6 +269,7 @@ AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"}
 # aquí no se puede apagar desde el CRM.
 CLAVE_DE_HERRAMIENTA = {
     "update_ficha": "ficha",
+    "move_stage": "etapa",
     "propose_slots": "agendar",
     "book_session": "agendar",
     "list_bookings": "agendar",
@@ -416,8 +463,11 @@ class ToolRuntime:
         profile: BusinessProfile | None = None,
         tz: ZoneInfo | None = None,
         conversacion_reciente: str | None = None,
+        etapas: list[str] | None = None,
     ) -> None:
         self._ctx = ctx
+        # 038 — A qué etapas puede mover al lead (`lead.nextStages`).
+        self.etapas: list[str] = list(etapas or [])
         # Lo último que se dijo en la conversación (app/dias.py). None ⇒ no
         # se sabe, y la fecha del modelo pasa sin revisar.
         self._conversacion_reciente = conversacion_reciente
@@ -431,6 +481,7 @@ class ToolRuntime:
         self.booking_confirmation: dict[str, Any] | None = None
         self.routed_out = False
         self.proposed = False
+        self.etapa_movida: str | None = None
 
     async def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -446,6 +497,8 @@ class ToolRuntime:
                 return await self._ctx.crm.cancel_booking(self._crm_conv_id, str(args["selection_token"]), True)
             if name == "update_ficha":
                 return await self._update_ficha(args)
+            if name == "move_stage":
+                return await self._move_stage(args)
             if name == "propose_slots":
                 return await self._propose_slots(args)
             if name == "book_session":
@@ -473,6 +526,22 @@ class ToolRuntime:
             return {"ok": True, "nota": "sin campos nuevos"}
         await self._ctx.crm.put_ficha(self._crm_conv_id, ficha)
         return {"ok": True}
+
+    async def _move_stage(self, args: dict[str, Any]) -> dict[str, Any]:
+        etapa = str(args.get("etapa") or "").strip()
+        if not etapa:
+            return {"ok": False, "error": "falta_etapa", "etapas": self.etapas}
+        try:
+            data = await self._ctx.crm.move_stage(self._crm_conv_id, etapa)
+        except CrmConflict as exc:
+            # El CRM manda la regla (solo hacia adelante, herramienta
+            # encendida): su mensaje dice a dónde sí, y con eso se corrige.
+            error = exc.payload.get("error")
+            detalle = error.get("message") if isinstance(error, dict) else None
+            return {"ok": False, "error": exc.code, "detalle": detalle or "no se movió"}
+        movida = ((data or {}).get("lead") or {}).get("stageName") or etapa
+        self.etapa_movida = movida
+        return {"ok": True, "etapa": movida, "nota": "hecho; no se lo anuncies al lead"}
 
     async def _propose_slots(self, args: dict[str, Any]) -> dict[str, Any]:
         fecha = _fecha_pedida(args.get("fecha"))

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import json
 from app.profile import BusinessProfile
 from app.state import Conversation, OfferedSlot
+from app.tools import etapas_siguientes
 
 DEFAULT_TZ = ZoneInfo("America/Mexico_City")
 
@@ -468,6 +469,15 @@ def build_system_prompt(
         lines.append(f"- Nombre del lead: {contact['name']}.")
     if lead.get("stageName"):
         lines.append(f"- Etapa en el pipeline: {lead['stageName']}.")
+    # 038 — Con la herramienta encendida y a dónde ir, se le dice a qué
+    # etapas puede moverlo. Es interno: el lead no sabe del pipeline.
+    siguientes = etapas_siguientes(context)
+    if siguientes and profile.permite("etapa"):
+        lines.append(
+            "- Puedes avanzar al lead en el pipeline con move_stage a: "
+            + ", ".join(siguientes)
+            + ". Hazlo cuando la conversación lo amerite, sin anunciárselo."
+        )
     ficha = contact.get("ficha") or {}
     filled = {k: v for k, v in ficha.items() if v not in (None, "", [])}
     if filled:

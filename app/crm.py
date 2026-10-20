@@ -267,6 +267,26 @@ class CrmClient:
         data: dict[str, Any] = resp.json()
         return data
 
+    async def move_stage(self, conversation_id: str, stage: str) -> dict[str, Any]:
+        """038 — Mueve al lead a una etapa siguiente (`POST /api/bot/stage`).
+
+        El 409 (`etapa_no_permitida`, `herramienta_apagada`, `ai_paused`) y el
+        422 (`etapa_desconocida`) suben como `CrmConflict` con el sobre de
+        error: su mensaje trae las etapas válidas, y es lo que el modelo
+        necesita para corregirse en el mismo turno.
+        """
+        resp = await self._request(
+            "POST",
+            "/api/bot/stage",
+            json={"conversationId": conversation_id, "stage": stage},
+        )
+        if resp.status_code in (409, 422):
+            raise CrmConflict(_conflict_code(resp), _payload(resp))
+        if resp.status_code != 200:
+            raise CrmError(f"stage devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
     async def post_handoff(self, conversation_id: str, reason: str | None = None) -> None:
         resp = await self._request(
             "POST",
