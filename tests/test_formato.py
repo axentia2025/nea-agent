@@ -25,7 +25,7 @@ from tests.conftest import (
     crm_context,
     make_ctx,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 MUESTRAS = [
@@ -213,7 +213,7 @@ async def test_el_turno_envia_y_guarda_lo_convertido(respx_mock):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://bot.test"
     ) as client:
-        await client.post("/webhook", content=wa_body(text="¿cuánto cuesta?"))
+        await despachar(client, ctx, text="¿cuánto cuesta?")
         await asyncio.sleep(0.35)
     assert routes["messages"].call_count == 1
     enviado = json.loads(routes["messages"].calls[0].request.content)["text"]

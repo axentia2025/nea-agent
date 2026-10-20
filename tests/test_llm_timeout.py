@@ -145,7 +145,7 @@ async def test_el_arranque_de_siempre_arma_el_llm_con_el_tope(monkeypatch, respx
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "20")
     monkeypatch.setenv("DATABASE_URL", "postgres://no-se-usa")
     monkeypatch.setattr(main, "PgStore", lambda *_a, **_k: _StoreDePrueba())
-    for worker in ("RelayWorker", "FollowupWorker", "SenderWorker"):
+    for worker in ("FollowupWorker", "SenderWorker"):
         monkeypatch.setattr(main, worker, _WorkerQuieto)
     respx_mock.get(f"{CRM_URL}/api/bot/availability").mock(
         return_value=httpx.Response(422, json={"error": {"code": "invalid_body"}})

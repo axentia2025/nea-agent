@@ -129,7 +129,8 @@ async def main():
         process = start()
         await asyncio.to_thread(wait_for, lambda: len(received) == 1)
         with httpx.Client(base_url=f"http://127.0.0.1:{nea_port}") as client:
-            assert client.post("/webhook", content=b"{}").status_code == 404
+            # 031: el webhook de Meta ya no entra; 503 para que Meta reintente.
+            assert client.post("/webhook", content=b"{}").status_code == 503
             assert client.post("/vocero/dispatch", content=b"{}").status_code == 401
             for org, marker in [("a", "segundo_turno_A"), ("b", "marca_privada_B")]:
                 body = json.dumps(event(org, "525555555555", marker)).encode()

@@ -325,7 +325,7 @@ async def test_el_arranque_deja_armada_la_sonda(monkeypatch, respx_mock):
     monkeypatch.setenv("AGENDA_PROBE_TTL_SECONDS", "15")
     monkeypatch.setenv("DATABASE_URL", "postgres://no-se-usa")
     monkeypatch.setattr(main, "PgStore", lambda *_a, **_k: _StoreDePrueba())
-    for worker in ("RelayWorker", "FollowupWorker", "SenderWorker"):
+    for worker in ("FollowupWorker", "SenderWorker"):
         monkeypatch.setattr(main, worker, _WorkerQuieto)
     respx_mock.get(f"{CRM_URL}/api/bot/availability").mock(return_value=httpx.Response(404))
 

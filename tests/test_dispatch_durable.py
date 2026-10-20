@@ -42,7 +42,8 @@ async def test_ack_is_durable_without_running_turn(monkeypatch):
         assert await drain_one(ctx)
         assert not await drain_one(ctx)
         process.assert_awaited_once()
-        assert (await client.post("/webhook", content=b"{}")).status_code == 404
+        # 031 — El webhook de Meta ya no entra: 503 para que Meta reintente.
+        assert (await client.post("/webhook", content=b"{}")).status_code == 503
         assert (await client.get("/webhook")).status_code == 404
     await ctx.crm.aclose()
 

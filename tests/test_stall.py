@@ -26,7 +26,7 @@ from tests.conftest import (
     make_ctx,
     make_settings,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 
@@ -93,9 +93,7 @@ def test_agendando_nunca_se_cierra_por_el_candado():
 
 async def _tres_vacios(ctx, client):
     for i, texto in enumerate(("ok", "va", "ajá")):
-        await client.post(
-            "/webhook", content=wa_body(text=texto, wamid=f"wamid.v{i}")
-        )
+        await despachar(client, ctx, text=texto, wamid=f"wamid.v{i}")
         await asyncio.sleep(0.35)
 
 
@@ -124,7 +122,7 @@ async def test_cierra_una_vez_y_despues_calla(ctx, client, respx_mock):
 
     # Y a partir de aquí, silencio ante el relleno: ni LLM ni envío.
     llamadas_previas = len(ctx.llm.calls)
-    await client.post("/webhook", content=wa_body(text="gracias", wamid="wamid.v9"))
+    await despachar(client, ctx, text="gracias", wamid="wamid.v9")
     await asyncio.sleep(0.35)
     assert routes["messages"].call_count == 3
     assert len(ctx.llm.calls) == llamadas_previas
@@ -143,7 +141,7 @@ async def test_el_lead_que_vuelve_tras_el_enfriamiento_reabre(
     )
 
     # Pasado el enfriamiento reabre cualquier mensaje, hasta un "ok".
-    await client.post("/webhook", content=wa_body(text="ok", wamid="wamid.r1"))
+    await despachar(client, ctx, text="ok", wamid="wamid.r1")
     await asyncio.sleep(0.35)
 
     assert routes["messages"].call_count == 1  # volvió a atenderlo
@@ -157,9 +155,7 @@ async def test_el_candado_no_pisa_el_handoff_por_hostilidad(
     handoff por hostilidad manda, porque el dueño tiene que ver esa conversación."""
     routes = mock_crm_basics(respx_mock)
     for i, texto in enumerate(("son unos rateros", "puro humo", "pinches estafadores")):
-        await client.post(
-            "/webhook", content=wa_body(text=texto, wamid=f"wamid.h{i}")
-        )
+        await despachar(client, ctx, text=texto, wamid=f"wamid.h{i}")
         await asyncio.sleep(0.35)
 
     assert routes["handoff"].call_count == 1
@@ -177,7 +173,7 @@ async def test_no_manda_escribiendo_a_una_conversacion_cerrada(
     )
     previos = routes["typing"].call_count
 
-    await client.post("/webhook", content=wa_body(text="ok", wamid="wamid.t1"))
+    await despachar(client, ctx, text="ok", wamid="wamid.t1")
     await asyncio.sleep(0.35)
 
     assert routes["typing"].call_count == previos
@@ -251,7 +247,7 @@ async def _cerrada(ctx, hace: timedelta = timedelta(minutes=5)):
 
 
 async def _manda(client, texto, wamid):
-    await client.post("/webhook", content=wa_body(text=texto, wamid=wamid))
+    await despachar(client, text=texto, wamid=wamid)
     await asyncio.sleep(0.35)
 
 

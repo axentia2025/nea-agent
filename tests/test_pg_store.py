@@ -14,7 +14,8 @@ donde se rompió dos veces:
   bandeja del CRM, los estados de entrega no se movían y, con un contacto
   nuevo, `/api/bot/context` daba 404 y Nea no contestaba nunca.
 
-Las dos habrían salido aquí en el primer `SELECT`.
+Las dos habrían salido aquí en el primer `SELECT`. (El relay ya no existe
+desde la 2.0, spec 031; su tabla se queda sin uso y se borra después.)
 
 ## Cómo se corre
 
@@ -48,7 +49,6 @@ import pytest
 from app.crm import CrmClient
 from app.db import PgStore
 from app.main import MIGRATIONS_DIR, create_app
-from app.relay import RelayWorker
 from app.sender import SenderWorker
 from app.state import (
     AppContext,
@@ -56,19 +56,16 @@ from app.state import (
     Conversation,
     OfferedSlot,
     PendingSend,
-    RelayItem,
-    RelayStats,
 )
 from tests.conftest import (
     CRM_CONV_ID,
     CRM_URL,
-    CRM_WEBHOOK_URL,
     IDENTITY,
     FakeLLM,
     crm_context,
     make_settings,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
@@ -191,7 +188,6 @@ async def _columnas(store: PgStore, tabla: str) -> set[str]:
 @pytest.mark.parametrize(
     "tabla, modelo",
     [
-        ("relay_queue", RelayItem),
         ("bot_conversation", Conversation),
         ("bot_message", BotMessage),
         ("offered_slots", OfferedSlot),
@@ -207,26 +203,41 @@ async def test_cada_campo_del_modelo_tiene_su_columna(store, tabla, modelo):
     assert not faltan, f"{tabla} no tiene columna para {sorted(faltan)}"
 
 
-async def test_relay_queue_no_tiene_organizacion(store):
-    """El relay es del modo de siempre, donde la organización es la única que
-    hay. Leer estas columnas fue exactamente el fallo de 95549c8."""
-    columnas = await _columnas(store, "relay_queue")
-    assert "organization_id" not in columnas
-    assert "organization_slug" not in columnas
+async def test_con_esquema_propio_las_tablas_viven_ahi(base_de_prueba):
+    """031 — `DATABASE_SCHEMA`: Nea comparte la base del CRM sin pisarse.
+
+    El esquema se crea si no existe, las migraciones caen en él, y re-conectar
+    (cada arranque) no falla porque ya exista.
+    """
+    for _ in range(2):
+        s = PgStore(base_de_prueba, schema="nea_031")
+        await s.connect()
+        try:
+            await s.migrate(MIGRATIONS_DIR)
+            assert await s.pool.fetchval("SELECT current_schema()") == "nea_031"
+            tablas = {
+                f["table_name"]
+                for f in await s.pool.fetch(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'nea_031'"
+                )
+            }
+            assert {"bot_conversation", "bot_message", "dispatch_inbox", "pending_send"} <= tablas
+            conv = await s.get_or_create_conversation(IDENTITY, "", "")
+            assert conv.id >= 1
+        finally:
+            await s.aclose()
 
 
 async def test_re_migrar_con_datos_no_pierde_nada(store):
     """Cada arranque re-aplica TODAS las migraciones sobre una base con datos."""
     conv = await store.get_or_create_conversation(IDENTITY, "org_a", "a")
     await store.add_message(conv.id, "user", "hola")
-    await store.enqueue_relay(b"{}", None)
 
     await store.migrate(MIGRATIONS_DIR)
 
     otra_vez = await store.get_or_create_conversation(IDENTITY, "org_a", "a")
     assert otra_vez.id == conv.id
     assert [m.content for m in await store.recent_messages(conv.id, 10)] == ["hola"]
-    assert len(await store.due_relays(await _ahora(store))) == 1
 
 
 # ─────────────────────────────────────────────────────────────── dedup ───
@@ -247,318 +258,7 @@ async def test_already_processed_consulta_sin_marcar(store):
     assert await store.already_processed([]) == set()
 
 
-# ─────────────────────────────────────────────────────────────── relay ───
-
-
-async def test_encolar_y_leer_el_relay_devuelve_la_fila_entera(store):
-    """EL fallo: esta lectura reventaba con KeyError desde 95549c8."""
-    cuerpo = '{"entry":[{"texto":"ñandú 🧉"}]}'.encode()
-    rid = await store.enqueue_relay(cuerpo, "sha256=abc")
-
-    [item] = await store.due_relays(await _ahora(store))
-
-    assert isinstance(item, RelayItem)
-    assert item.id == rid
-    assert item.body == cuerpo  # bytes EXACTOS: el CRM re-verifica la firma
-    assert isinstance(item.body, bytes)
-    assert item.signature == "sha256=abc"
-    assert item.attempts == 0
-    assert item.created_at.tzinfo is not None
-    assert item.next_retry_at.tzinfo is not None
-    assert item.delivered_at is None and item.abandoned_at is None
-
-
-async def test_relay_sin_firma(store):
-    await store.enqueue_relay(b"{}", None)
-    [item] = await store.due_relays(await _ahora(store))
-    assert item.signature is None
-
-
-async def test_reprogramar_saca_el_relay_de_la_cola_hasta_su_hora(store):
-    rid = await store.enqueue_relay(b"{}", None)
-    ahora = await _ahora(store)
-    await store.reschedule_relay(rid, 3, ahora + timedelta(minutes=5))
-
-    assert await store.due_relays(ahora) == []
-    [item] = await store.due_relays(ahora + timedelta(minutes=6))
-    assert item.attempts == 3
-    assert item.next_retry_at == ahora + timedelta(minutes=5)
-
-
-async def test_el_estado_del_relay_para_health(store):
-    """Lo que /health enseña: pendientes, edad del más viejo, último error."""
-    assert await store.relay_stats() == RelayStats(0, None, None)
-    fallido = await store.enqueue_relay(b"{}", None)
-    await store.enqueue_relay(b"{}", None)
-    await store.mark_relay_delivered(await store.enqueue_relay(b"{}", None))
-    await store.mark_relay_abandoned(await store.enqueue_relay(b"{}", None))
-    ahora = await _ahora(store)
-    await store.reschedule_relay(fallido, 1, ahora + timedelta(seconds=30))
-    await store.pool.execute(
-        "UPDATE relay_queue SET created_at = now() - interval '5 minutes' WHERE id = $1",
-        fallido,
-    )
-
-    stats = await store.relay_stats()
-
-    assert stats.pendientes == 2  # ni el entregado ni el abandonado
-    assert 300 <= stats.mas_viejo_segundos < 400
-    assert stats.ultimo_error_en is not None
-    assert stats.ultimo_error_en.tzinfo is not None
-    [item] = [i for i in await store.due_relays(ahora + timedelta(minutes=1)) if i.id == fallido]
-    assert item.last_error_at == stats.ultimo_error_en
-
-
-async def test_entregado_o_abandonado_ya_no_se_reintenta(store):
-    entregado = await store.enqueue_relay(b'{"a":1}', None)
-    abandonado = await store.enqueue_relay(b'{"b":2}', None)
-    vivo = await store.enqueue_relay(b'{"c":3}', None)
-
-    await store.mark_relay_delivered(entregado)
-    await store.mark_relay_abandoned(abandonado)
-
-    assert [i.id for i in await store.due_relays(await _ahora(store))] == [vivo]
-    marcas = await store.pool.fetch(
-        "SELECT id, delivered_at, abandoned_at FROM relay_queue ORDER BY id"
-    )
-    assert marcas[0]["delivered_at"] is not None
-    assert marcas[1]["abandoned_at"] is not None
-
-
-async def test_el_relay_sabe_si_aun_guarda_el_payload_de_una_rafaga(store):
-    """Lo que separa «el CRM no conoce a este lead» de «todavía no le llega su
-    mensaje» cuando `/api/bot/context` da 404 (app/turn.py)."""
-    pendiente = await store.enqueue_relay(wa_body(text="hola", wamid="wamid.pg.1"), None)
-    entregado = await store.enqueue_relay(wa_body(text="hola", wamid="wamid.pg.2"), None)
-    await store.mark_relay_delivered(entregado)
-
-    assert await store.relay_pendiente_con(["wamid.pg.1"]) is True
-    assert await store.relay_pendiente_con(["wamid.otro", "wamid.pg.1"]) is True
-    assert await store.relay_pendiente_con(["wamid.pg.2"]) is False  # ya entregado
-    assert await store.relay_pendiente_con([]) is False
-    await store.mark_relay_abandoned(pendiente)
-    assert await store.relay_pendiente_con(["wamid.pg.1"]) is False
-
-
-async def test_adelantar_el_relay_lo_pone_a_tocar_ya(store):
-    ahora = await _ahora(store)
-    en_espera = await store.enqueue_relay(b"{}", None)
-    await store.reschedule_relay(en_espera, 4, ahora + timedelta(minutes=10))
-    await store.mark_relay_delivered(await store.enqueue_relay(b"{}", None))
-
-    assert await store.due_relays(ahora) == []
-    assert await store.adelantar_relays(ahora) == 1  # el entregado no cuenta
-    [item] = await store.due_relays(ahora)
-    assert item.id == en_espera and item.attempts == 4
-
-
-async def test_la_cola_sale_en_orden_y_en_tandas_de_50(store):
-    ids = [await store.enqueue_relay(f'{{"n":{n}}}'.encode(), None) for n in range(55)]
-    tanda = await store.due_relays(await _ahora(store))
-    assert [i.id for i in tanda] == ids[:50]
-
-
-async def test_el_worker_entrega_al_crm_con_postgres(store, respx_mock):
-    """`RelayWorker.process_due` de punta a punta contra la base real."""
-    crm = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
-    cuerpo = b'{"object":"whatsapp_business_account","entry":[]}'
-    rid = await store.enqueue_relay(cuerpo, "sha256=firma-de-meta")
-
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, asyncio.Event())
-    try:
-        await worker.process_due(now=await _ahora(store))
-    finally:
-        await worker.aclose()
-
-    assert crm.call_count == 1
-    assert crm.calls[0].request.content == cuerpo
-    assert crm.calls[0].request.headers["x-hub-signature-256"] == "sha256=firma-de-meta"
-    fila = await store.pool.fetchrow("SELECT * FROM relay_queue WHERE id = $1", rid)
-    assert fila["delivered_at"] is not None
-    assert await store.due_relays(await _ahora(store)) == []
-
-
-async def test_el_worker_reprograma_con_backoff_si_el_crm_falla(store, respx_mock):
-    respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(503))
-    rid = await store.enqueue_relay(b"{}", None)
-
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, asyncio.Event())
-    ahora = await _ahora(store)
-    try:
-        await worker.process_due(now=ahora)
-    finally:
-        await worker.aclose()
-
-    fila = await store.pool.fetchrow("SELECT * FROM relay_queue WHERE id = $1", rid)
-    assert fila["attempts"] == 1
-    assert fila["next_retry_at"] > ahora
-    assert fila["delivered_at"] is None
-
-
-async def test_el_worker_abandona_lo_de_mas_de_24_h(store, respx_mock):
-    crm = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
-    rid = await store.enqueue_relay(b"{}", None)
-    await store.pool.execute(
-        "UPDATE relay_queue SET created_at = now() - interval '25 hours' WHERE id = $1",
-        rid,
-    )
-
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, asyncio.Event())
-    try:
-        await worker.process_due(now=await _ahora(store))
-    finally:
-        await worker.aclose()
-
-    assert crm.call_count == 0
-    fila = await store.pool.fetchrow("SELECT * FROM relay_queue WHERE id = $1", rid)
-    assert fila["abandoned_at"] is not None
-
-
-async def test_un_barrido_vacia_la_cola_atrasada_entera(store, respx_mock):
-    """La cola que dejó el relay roto: miles de webhooks viejos delante de los
-    nuevos. De a 50 por barrido (cada 5 s), los mensajes nuevos esperaban
-    detrás; un barrido tiene que abandonar los viejos y entregar los nuevos."""
-    crm = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
-    viejos = [await store.enqueue_relay(b'{"viejo":1}', None) for _ in range(120)]
-    nuevos = [await store.enqueue_relay(b'{"nuevo":1}', None) for _ in range(7)]
-    await store.pool.execute(
-        "UPDATE relay_queue SET created_at = now() - interval '3 days' WHERE id = ANY($1::bigint[])",
-        viejos,
-    )
-
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, asyncio.Event())
-    try:
-        await worker.process_due(now=await _ahora(store))
-    finally:
-        await worker.aclose()
-
-    assert crm.call_count == len(nuevos)  # los viejos ni se intentan
-    conteo = await store.pool.fetchrow(
-        """
-        SELECT count(*) FILTER (WHERE abandoned_at IS NOT NULL) AS abandonados,
-               count(*) FILTER (WHERE delivered_at IS NOT NULL) AS entregados
-        FROM relay_queue
-        """
-    )
-    assert (conteo["abandonados"], conteo["entregados"]) == (120, 7)
-    assert await store.due_relays(await _ahora(store)) == []
-
-
-def _estados_de_meta() -> bytes:
-    """Un POST de Meta que solo trae estados de entrega: relay y nada más."""
-    return json.dumps(
-        {
-            "object": "whatsapp_business_account",
-            "entry": [
-                {
-                    "id": "entry1",
-                    "changes": [
-                        {
-                            "field": "messages",
-                            "value": {
-                                "messaging_product": "whatsapp",
-                                "metadata": {"phone_number_id": "123"},
-                                "statuses": [
-                                    {
-                                        "id": "wamid.saliente",
-                                        "status": "read",
-                                        "timestamp": "1752700000",
-                                        "recipient_id": IDENTITY,
-                                    }
-                                ],
-                            },
-                        }
-                    ],
-                }
-            ],
-        }
-    ).encode()
-
-
-async def _hasta(condicion, segundos: float = 5.0) -> None:
-    limite = asyncio.get_running_loop().time() + segundos
-    while not condicion():
-        if asyncio.get_running_loop().time() > limite:
-            return
-        await asyncio.sleep(0.05)
-
-
-async def test_los_estados_de_entrega_llegan_al_crm(store, respx_mock):
-    """Del POST de Meta a la bandeja del CRM, con la cola en Postgres."""
-    crm = respx_mock.post(CRM_WEBHOOK_URL).mock(return_value=httpx.Response(200))
-    ctx = _ctx(store)
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, ctx.relay_wake)
-    tarea = asyncio.create_task(worker.run())
-    app = create_app(ctx=ctx)
-    cuerpo = _estados_de_meta()
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://bot.test"
-        ) as cliente:
-            resp = await cliente.post("/webhook", content=cuerpo)
-            assert resp.status_code == 200
-            await _hasta(lambda: crm.called)
-    finally:
-        tarea.cancel()
-        await asyncio.gather(tarea, return_exceptions=True)
-        await worker.aclose()
-        await ctx.crm.aclose()
-
-    assert crm.call_count == 1
-    assert crm.calls[0].request.content == cuerpo
-
-
-async def test_un_contacto_nuevo_recibe_respuesta_porque_el_relay_llega(
-    store, respx_mock
-):
-    """El síntoma que vería un negocio: el primer mensaje de alguien nuevo.
-
-    El CRM no conoce la identidad hasta que le llega el relay, y mientras
-    tanto `/api/bot/context` responde 404. Con el relay roto ese 404 no
-    cambiaba nunca y Nea se quedaba callada con cada contacto nuevo.
-    """
-    rutas = mock_crm_basics(respx_mock)
-    rutas["context"].mock(
-        side_effect=lambda _req: (
-            httpx.Response(200, json=crm_context())
-            if rutas["relay"].called
-            else httpx.Response(404)
-        )
-    )
-    ctx = _ctx(store)
-    worker = RelayWorker(store, CRM_WEBHOOK_URL, ctx.relay_wake)
-    tarea = asyncio.create_task(worker.run())
-    app = create_app(ctx=ctx)
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://bot.test"
-        ) as cliente:
-            await cliente.post("/webhook", content=wa_body(text="hola, quiero info"))
-            await _hasta(lambda: rutas["messages"].called)
-            await asyncio.sleep(0.2)  # que el turno termine de guardar
-    finally:
-        tarea.cancel()
-        await asyncio.gather(tarea, return_exceptions=True)
-        await worker.aclose()
-        if ctx.coalescer is not None:
-            await ctx.coalescer.aclose()
-        await ctx.crm.aclose()
-
-    assert rutas["relay"].call_count == 1
-    assert rutas["messages"].call_count == 1
-    enviado = json.loads(rutas["messages"].calls[0].request.content)
-    assert enviado["conversationId"] == CRM_CONV_ID
-    # Y el turno dejó su rastro en Postgres, no solo en el CRM.
-    conv = await store.get_or_create_conversation(IDENTITY)
-    assert conv.crm_conversation_id == CRM_CONV_ID
-    assert conv.greeted is True
-    assert [m.role for m in await store.recent_messages(conv.id, 10)] == [
-        "user",
-        "assistant",
-    ]
-
-
-# ─────────────────────────────────────────────────────── conversaciones ───
+# ────────────────────────────────────────────────────── conversaciones ───
 
 
 async def test_crear_conversacion_con_sus_defaults(store):

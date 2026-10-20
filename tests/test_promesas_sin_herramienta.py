@@ -15,7 +15,7 @@ from app.profile import BusinessProfile
 from app.prompt import build_system_prompt
 from app.state import Conversation
 from app.tools import TOOL_SCHEMAS, tool_schemas
-from tests.conftest import mock_crm_basics, wa_body
+from tests.conftest import mock_crm_basics, despachar
 
 AHORA = datetime(2026, 9, 21, 23, 0, tzinfo=timezone.utc)
 SIN_RECORDATORIOS = "Este negocio NO manda recordatorios por aquí"
@@ -73,7 +73,7 @@ def test_los_nunca_siguen_todos_y_se_suma_el_de_no_prometer_sin_herramienta():
 
 async def test_el_turno_estandar_no_le_ensena_recordatorios_al_modelo(ctx, client, respx_mock):
     mock_crm_basics(respx_mock)
-    await client.post("/webhook", content=wa_body(text="quiero agendar"))
+    await despachar(client, ctx, text="quiero agendar")
     await asyncio.sleep(0.25)
     llamada = ctx.llm.calls[0]
     assert "recordatorios_aceptados" not in _book(llamada["tools"])["properties"]

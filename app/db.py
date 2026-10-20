@@ -18,8 +18,6 @@ from app.state import (
     Conversation,
     OfferedSlot,
     PendingSend,
-    RelayItem,
-    RelayStats,
 )
 
 logger = logging.getLogger("nea.db")
@@ -43,34 +41,6 @@ def _conv_from_row(row: asyncpg.Record) -> Conversation:
         stall_since_message_id=row["stall_since_message_id"],
         organization_id=row["organization_id"],
         organization_slug=row["organization_slug"],
-    )
-
-
-def _relay_desde_fila(row: Any) -> RelayItem:
-    """Una fila de `relay_queue` → su dataclass.
-
-    `relay_queue` NO tiene columnas de organización, y no le hacen falta: el
-    relay solo existe en el modo de siempre (en cloud el CRM ya tiene el
-    mensaje), y ahí la organización es la única que hay.
-
-    Desde 95549c8 este mapeo leía `organization_id`/`organization_slug` —se
-    copiaron aquí junto con los de `pending_send`— y reventaba con `KeyError`
-    en la primera fila pendiente. `RelayWorker.run` se tragaba la excepción
-    cada 5 s: ningún entrante llegaba a la bandeja del CRM, los estados de
-    entrega no se actualizaban y, con un contacto nuevo, `/api/bot/context`
-    daba 404 y Nea no contestaba. Las pruebas no lo vieron porque usaban
-    `MemoryStore`; ahora `tests/test_pg_store.py` lo corre contra Postgres.
-    """
-    return RelayItem(
-        id=row["id"],
-        body=bytes(row["body"]),
-        signature=row["signature"],
-        attempts=row["attempts"],
-        created_at=row["created_at"],
-        next_retry_at=row["next_retry_at"],
-        delivered_at=row["delivered_at"],
-        abandoned_at=row["abandoned_at"],
-        last_error_at=row["last_error_at"],
     )
 
 
@@ -106,8 +76,12 @@ def _pending_send_desde_fila(row: Any) -> PendingSend:
 class PgStore(PgDispatchStore):
     """Store respaldado por Postgres (asyncpg)."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, schema: str = "") -> None:
         self._dsn = dsn
+        # 031 — Vacío = `public`, como siempre. Con nombre, las tablas de Nea
+        # viven en ese esquema y la base se puede compartir con el CRM. El
+        # nombre ya llega validado por `Settings` (minúsculas, dígitos y `_`).
+        self._schema = schema
         self._pool: asyncpg.Pool | None = None
 
     @property
@@ -117,7 +91,25 @@ class PgStore(PgDispatchStore):
         return self._pool
 
     async def connect(self) -> None:
-        self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+        if not self._schema:
+            self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+            return
+        # El esquema tiene que existir ANTES de abrir el pool: con un
+        # `search_path` que apunta a un esquema que no existe, Postgres acepta
+        # la conexión y el primer CREATE TABLE falla con «no schema has been
+        # selected».
+        conn = await asyncpg.connect(self._dsn)
+        try:
+            await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
+        finally:
+            await conn.close()
+        self._pool = await asyncpg.create_pool(
+            self._dsn,
+            min_size=1,
+            max_size=5,
+            server_settings={"search_path": self._schema},
+        )
+        logger.info("tablas de Nea en el esquema %s", self._schema)
 
     async def migrate(self, migrations_dir: Path) -> None:
         """Aplica todas las migraciones en orden. Son idempotentes: re-correr es seguro."""
@@ -149,108 +141,6 @@ class PgStore(PgDispatchStore):
             marcas,
         )
         return {r["wa_message_id"] for r in rows}
-
-    # -------------------------------------------------------------- relay ---
-
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int:
-        row = await self.pool.fetchrow(
-            "INSERT INTO relay_queue (body, signature) VALUES ($1, $2) RETURNING id",
-            body,
-            signature,
-        )
-        assert row is not None
-        return row["id"]
-
-    async def due_relays(self, now: datetime) -> list[RelayItem]:
-        rows = await self.pool.fetch(
-            """
-            SELECT * FROM relay_queue
-            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at <= $1
-            ORDER BY id
-            LIMIT 50
-            """,
-            now,
-        )
-        return [_relay_desde_fila(r) for r in rows]
-
-    async def mark_relay_delivered(self, relay_id: int) -> None:
-        await self.pool.execute(
-            "UPDATE relay_queue SET delivered_at = now() WHERE id = $1", relay_id
-        )
-
-    async def mark_relay_abandoned(self, relay_id: int) -> None:
-        await self.pool.execute(
-            "UPDATE relay_queue SET abandoned_at = now() WHERE id = $1", relay_id
-        )
-
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None:
-        await self.pool.execute(
-            # Solo se reprograma tras una entrega fallida: es el último error.
-            """
-            UPDATE relay_queue
-            SET attempts = $2, next_retry_at = $3, last_error_at = now()
-            WHERE id = $1
-            """,
-            relay_id,
-            attempts,
-            next_retry_at,
-        )
-
-    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
-        # La cola pendiente es corta (lo demás está entregado o abandonado) y
-        # el índice parcial de 001 la encuentra sin recorrer la tabla.
-        for marca in marcas:
-            if not marca:
-                continue
-            hay = await self.pool.fetchval(
-                """
-                SELECT EXISTS (
-                  SELECT 1 FROM relay_queue
-                  WHERE delivered_at IS NULL AND abandoned_at IS NULL
-                    AND position($1::bytea IN body) > 0
-                )
-                """,
-                marca.encode(),
-            )
-            if hay:
-                return True
-        return False
-
-    async def adelantar_relays(self, now: datetime) -> int:
-        estado = await self.pool.execute(
-            """
-            UPDATE relay_queue SET next_retry_at = $1
-            WHERE delivered_at IS NULL AND abandoned_at IS NULL AND next_retry_at > $1
-            """,
-            now,
-        )
-        return int(str(estado).rsplit(" ", 1)[-1] or 0)
-
-    async def relay_stats(self) -> RelayStats:
-        # Los dos índices parciales (el de la cola y el de 007) dejan contestar
-        # sin recorrer la tabla, que no se purga: /health corre cada 30 s. La
-        # edad se calcula con el reloj de Postgres, el mismo de `created_at`.
-        row = await self.pool.fetchrow(
-            """
-            SELECT
-              count(*) AS pendientes,
-              floor(EXTRACT(EPOCH FROM now() - min(created_at)))::bigint
-                AS mas_viejo_segundos,
-              (SELECT max(last_error_at) FROM relay_queue
-                WHERE last_error_at IS NOT NULL) AS ultimo_error_en
-            FROM relay_queue
-            WHERE delivered_at IS NULL AND abandoned_at IS NULL
-            """
-        )
-        assert row is not None
-        edad = row["mas_viejo_segundos"]
-        return RelayStats(
-            pendientes=row["pendientes"],
-            mas_viejo_segundos=max(0, int(edad)) if edad is not None else None,
-            ultimo_error_en=row["ultimo_error_en"],
-        )
 
     # ----------------------------------------------------- conversaciones ---
 

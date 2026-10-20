@@ -25,10 +25,6 @@ def canonical_identity(wa_id: str) -> str:
     return s
 
 
-# Tope de la suma de TURN_RETRY_DELAYS: pasado ese tiempo una respuesta ya no
-# contesta nada, y el turno se entrega a un humano (app/turn.py).
-TURN_RETRY_MAX_TOTAL_SECONDS = 600.0
-
 # Un BSUID tal como lo manda Meta: país, punto y el identificador
 # (`US.13491208655302741918`). El CRM lo guarda como `bsuid:<id>`.
 _BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
@@ -37,7 +33,7 @@ _BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
 def _identidad_de_lista(parte: str) -> str:
     """Una entrada de ALLOWED_WA_IDS / TESTER_WA_IDS, en la forma del CRM.
 
-    Las identidades llegan como las guarda el CRM (app/webhook.py): el BSUID
+    Las identidades llegan como las manda el CRM en el despacho: el BSUID
     con su prefijo `bsuid:`. En la lista vale escribirlo como lo enseña el
     CRM o pelón, como sale en el payload de Meta.
     """
@@ -55,19 +51,12 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    # Webhook de Meta
-    verify_token: str = ""
-    # Vacío: `/webhook` rechaza todo, y solo entra lo que llegue por
-    # `/webhook/<VERIFY_TOKEN>` (el secreto va en la ruta, sin firma).
-    meta_app_secret: str = ""
-
     # CRM (vocero-crm, bot gateway /api/bot/*)
+    #
+    # Desde la 2.0 Nea no recibe el webhook de Meta: lo recibe el CRM, que le
+    # DESPACHA la ráfaga firmada (app/dispatch.py). Contra Vocero raíz la
+    # firma es esta misma llave, la que autentica lo que Nea le manda al CRM.
     crm_base_url: str = "http://localhost:3000"
-    crm_webhook_url: str = ""  # incluye el segmento del verify token del CRM
-    # Relay al CRM (app/relay.py): la espera entre intentos crece al doble
-    # hasta este tope. Con 15 min, tras una caída larga el mensaje llegaba a
-    # la bandeja minutos después de que el CRM ya había vuelto.
-    relay_backoff_cap_seconds: float = Field(default=60.0, ge=1)
     crm_bot_api_key: str = ""
 
     # Perfil del negocio (capa de persona; ver app/profile.py)
@@ -183,7 +172,6 @@ class Settings(BaseSettings):
     # comando quedaba muerto justo donde hace falta — para correr una ronda
     # de pruebas en vivo había que cerrarle la puerta a los leads reales.
     tester_wa_ids: str = ""  # CSV; vacía = responde a todos (Constitución V)
-    coalesce_seconds: float = 4.0
     followup_hours: float = 4.0
     # Candado de cierre (app/stall.py): cuándo Nea se despide de una
     # conversación que no va a ningún lado y cuánto calla después. Los
@@ -193,22 +181,18 @@ class Settings(BaseSettings):
     # Tras el cierre, el relleno ("gracias", "ok", un emoji) se contesta con
     # silencio durante este tiempo; un mensaje con contenido reabre siempre.
     stall_cooldown_hours: float = Field(default=24.0, ge=0)
-    # "Escribiendo…" casi inmediato al recibir un mensaje (antes del coalesce).
-    typing_delay_seconds: float = 0.5
-    # Turno sin CRM (app/turn.py): si el CRM no contesta (red o 5xx), la misma
-    # ráfaga se vuelve a intentar tras estas esperas, en segundos. CSV; la
-    # suma se corta a los 10 min. Vacío = no se reintenta.
-    turn_retry_delays: str = "15,45,120,300"
 
     # ── Modo cloud (Vocero multitenant) ───────────────────────────────
     #
-    # Vacío = comportamiento de SIEMPRE: Meta manda el webhook a Nea, Nea lo
-    # relaya al CRM y habla con `/api/bot/*`. Ninguna instalación existente
-    # cambia por añadir esto, y ninguna variable nueva es obligatoria.
+    # En los dos modos el CRM recibe el mensaje y se lo DESPACHA a Nea
+    # firmado. Lo que cambia es contra qué CRM y por dónde se contesta:
     #
-    # `cloud` = Nea vive detrás de un Vocero multitenant: el CRM ya recibió el
-    # mensaje y se lo DESPACHA a Nea firmado, y Nea contesta por
-    # `/api/brains/*`. Su personalidad y su conocimiento vienen de SU CRM.
+    # Vacío = Vocero raíz: firma con `CRM_BOT_API_KEY`, contesta por
+    # `/api/bot/*`.
+    #
+    # `cloud` = Nea vive detrás de un Vocero multitenant: firma con
+    # `CRM_BRAIN_SECRET`, contesta por `/api/brains/*`. Su personalidad y su
+    # conocimiento vienen de SU CRM.
     #
     # Con `crm_organization` puesta atiende a ESE negocio y a nadie más: un
     # despacho de otra organización viene firmado con otro secreto y se
@@ -236,6 +220,11 @@ class Settings(BaseSettings):
 
     # Infra
     database_url: str = ""
+    # Esquema de Postgres donde viven las tablas de Nea. Vacío = `public`, como
+    # siempre. Con un nombre (`nea`), Nea lo crea si no existe y guarda ahí
+    # todo lo suyo: así puede compartir la base del CRM sin pisarse con él, y
+    # instalar el par no pide una segunda base.
+    database_schema: str = Field(default="", pattern=r"^[a-z_][a-z0-9_]{0,62}$|^$")
     port: int = 8000
 
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
@@ -273,34 +262,21 @@ class Settings(BaseSettings):
         """
         return self.vocero_mode.strip().lower() == "cloud"
 
+    @property
+    def dispatch_secret(self) -> str:
+        """Con qué llave se verifica la firma de un despacho.
+
+        La misma que autentica lo que Nea le manda a ese CRM: el secreto del
+        cerebro en cloud, la llave de `/api/bot/*` contra la raíz. Así no hay
+        un secreto más que copiar entre los dos.
+        """
+        return self.crm_brain_secret if self.cloud_mode else self.crm_bot_api_key
+
     @staticmethod
     def _identities(csv: str) -> frozenset[str]:
         return frozenset(
             _identidad_de_lista(part) for part in csv.split(",") if part.strip()
         )
-
-    @property
-    def turn_retry_schedule(self) -> tuple[float, ...]:
-        """Las esperas entre reintentos de un turno que no alcanzó al CRM.
-
-        Tolerante como el resto de la configuración: lo que no es un número
-        positivo se ignora, y la suma no pasa de TURN_RETRY_MAX_TOTAL_SECONDS:
-        una respuesta que llega a los diez minutos ya no contesta nada.
-        """
-        esperas: list[float] = []
-        total = 0.0
-        for parte in self.turn_retry_delays.split(","):
-            try:
-                espera = float(parte.strip())
-            except ValueError:
-                continue
-            if espera <= 0:
-                continue
-            if total + espera > TURN_RETRY_MAX_TOTAL_SECONDS:
-                break
-            esperas.append(espera)
-            total += espera
-        return tuple(esperas)
 
     @property
     def allowed_identities(self) -> frozenset[str]:

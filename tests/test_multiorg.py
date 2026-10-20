@@ -343,7 +343,6 @@ def arranque_multiorg(monkeypatch):
     for ausente in ("CRM_ORGANIZATION", "LLM_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.setenv(ausente, "")
     monkeypatch.setattr(main, "PgStore", lambda *_a, **_k: _StoreDePrueba())
-    monkeypatch.setattr(main, "RelayWorker", _WorkerQuieto)
     monkeypatch.setattr(main, "FollowupWorker", _WorkerQuieto)
     monkeypatch.setattr(main, "SenderWorker", _WorkerQuieto)
 

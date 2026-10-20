@@ -1,17 +1,17 @@
 """App FastAPI de Nea: lifespan (migraciones + workers) y /health.
 
 `create_app()` sin argumentos es el camino de producción (uvicorn app.main:app):
-el lifespan conecta Postgres, aplica migraciones y arranca los workers de relay
-y seguimiento. Los tests inyectan un `AppContext` ya armado (MemoryStore, LLM
+el lifespan conecta Postgres, aplica migraciones y arranca los workers del
+despacho, del seguimiento y de los envíos pendientes. Los tests inyectan un `AppContext` ya armado (MemoryStore, LLM
 fake, CRM contra respx) y manejan los workers a mano.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -19,7 +19,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.agenda import SondaDeAgenda
-from app.coalesce import Coalescer
 from app.config import Settings
 from app.crm import CrmClient
 from app.crm_brains import BrainsCrmClient
@@ -34,12 +33,10 @@ from app.multiorg import (
     RegistroDeOrganizaciones,
 )
 from app.profile import ProfileProvider
-from app.relay import RelayWorker
 from app.sender import SenderWorker
 from app.state import AppContext
-from app.turn import cancelar_pendientes, handle_flush, reanudar_pendientes
 from app.version import commit, version
-from app.webhook import router as webhook_router
+from app.webhook_retirado import router as webhook_retirado_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,36 +45,13 @@ logging.basicConfig(
 logger = logging.getLogger("nea.main")
 
 
-class SinTokenDelWebhook(logging.Filter):
-    """Tacha el token del webhook del CRM en los logs de httpx.
-
-    httpx escribe a INFO la URL de cada petición, y la del relay lleva el
-    `META_WEBHOOK_VERIFY_TOKEN` del CRM en la ruta
-    (`/api/webhooks/wa/<token>`): cada mensaje entrante lo dejaba en los logs
-    del contenedor. El resto de la línea (método, ruta, código) se queda,
-    que es lo que sirve para depurar.
-    """
-
-    _TOKEN = re.compile(r"(/api/webhooks/wa/)[^/\s\"?#]+")
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        mensaje = record.getMessage()
-        limpio = self._TOKEN.sub(r"\1***", mensaje)
-        if limpio != mensaje:
-            record.msg, record.args = limpio, None
-        return True
-
-
-logging.getLogger("httpx").addFilter(SinTokenDelWebhook())
-
-
 class SinTokenPropio(logging.Filter):
-    """Tacha el VERIFY_TOKEN de Nea en el log de accesos de uvicorn.
+    """Tacha el segmento secreto de `/webhook/<token>` en el log de uvicorn.
 
-    Con la entrada `/webhook/<VERIFY_TOKEN>` el token es el secreto que
-    protege el webhook, y uvicorn escribe la ruta y la query de cada petición:
-    sin esto quedaría en los logs en cada mensaje (ruta) y en cada handshake
-    de Meta (`hub.verify_token`).
+    Nea 1.x recibía el webhook de Meta en `/webhook/<VERIFY_TOKEN>`. La 2.0 ya
+    no lo recibe (app/webhook_retirado.py), pero una instalación que actualiza
+    sin mover el webhook sigue recibiendo esas peticiones, y uvicorn escribe
+    la ruta y la query de cada una: el token viejo quedaría en los logs.
     """
 
     _RUTA = re.compile(r"(/webhook/)[^/\s\"?#]+")
@@ -104,20 +78,12 @@ logging.getLogger("uvicorn.access").addFilter(SinTokenPropio())
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def _wire_coalescer(ctx: AppContext) -> None:
-    if ctx.coalescer is None:
-        ctx.coalescer = Coalescer(
-            ctx.settings.coalesce_seconds, partial(handle_flush, ctx)
-        )
-
-
 def _identidad(settings: Settings | None) -> dict[str, Any]:
     """Qué Nea es: versión, commit y modo. Lo lee el CRM («Quién responde»).
 
     `commit` y `commitVerified` van igual que en el `/api/health` del CRM: solo
     si hay commit, y `commitVerified` es `true` únicamente si salió del build
-    (app/version.py). Nada de secretos ni de URLs: el webhook del CRM lleva
-    su token en la ruta.
+    (app/version.py). Nada de secretos ni de URLs.
     """
     cuerpo: dict[str, Any] = {"version": version()}
     c = commit()
@@ -133,23 +99,28 @@ def _identidad(settings: Settings | None) -> dict[str, Any]:
     return cuerpo
 
 
-async def _estado_del_relay(ctx: AppContext) -> dict[str, Any] | None:
-    """La cola del relay al CRM. `None` si no se pudo leer: la DB ya
-    contestó al ping, y un fallo aquí no debe tumbar el healthcheck."""
-    try:
-        stats = await ctx.store.relay_stats()
-    except Exception:
-        logger.exception("health: no pude leer la cola del relay")
-        return None
-    return {
-        "pendientes": stats.pendientes,
-        "masViejoSegundos": stats.mas_viejo_segundos,
-        "ultimoErrorEn": (
-            stats.ultimo_error_en.isoformat(timespec="seconds")
-            if stats.ultimo_error_en is not None
-            else None
-        ),
-    }
+# Variables de Nea 1.x que la 2.0 ya no lee. Una variable que deja de leerse
+# no avisa sola: el contenedor arranca igual y quien instala cree que hace algo.
+OBSOLETAS = (
+    "META_APP_SECRET",
+    "VERIFY_TOKEN",
+    "CRM_WEBHOOK_URL",
+    "RELAY_BACKOFF_CAP_SECONDS",
+    "COALESCE_SECONDS",
+    "TYPING_DELAY_SECONDS",
+    "TURN_RETRY_DELAYS",
+)
+
+
+def _avisar_obsoletas() -> None:
+    puestas = [v for v in OBSOLETAS if os.environ.get(v, "").strip()]
+    if puestas:
+        logger.warning(
+            "estas variables ya no se usan desde la 2.0 y se pueden quitar: %s. "
+            "Nea ya no recibe el webhook de Meta: lo recibe el CRM y se lo "
+            "despacha (BRAIN_DISPATCH_URL en el CRM → /vocero/dispatch de Nea).",
+            ", ".join(puestas),
+        )
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
@@ -158,18 +129,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         own_resources = app.state.ctx is None
         if own_resources:
             settings = Settings()
-            store = PgStore(settings.database_url)
+            _avisar_obsoletas()
+            store = PgStore(settings.database_url, settings.database_schema)
             await store.connect()
             await store.migrate(MIGRATIONS_DIR)
             logger.info("migraciones aplicadas — DB lista")
-            # Tres modos, y solo el primero es nuevo:
+            # Tres modos. Los tres reciben el despacho; cambia con quién
+            # contestan:
             #
             # - multi-organización: no hay cliente fijo. Cada turno arma el
             #   suyo con la credencial derivada de SU organización, y el
             #   centinela hace que un camino que se olvide de armarlo
             #   reviente en vez de escribirle al negocio equivocado.
             # - cloud de un negocio: el cliente de una sola organización.
-            # - sin bandera: exactamente lo de toda la vida.
+            # - sin bandera: Vocero raíz, por `/api/bot/*`.
             registro = None
             if settings.multi_org:
                 registro = RegistroDeOrganizaciones(
@@ -224,7 +197,6 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 registro=registro,
             )
         c: AppContext = app.state.ctx
-        _wire_coalescer(c)
 
         if c.settings.audio_mal_configurado:
             logger.warning(
@@ -252,37 +224,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 c.agenda_sonda.ttl,
             )
 
-        relay_worker = RelayWorker(
-            c.store,
-            c.settings.crm_webhook_url,
-            c.relay_wake,
-            backoff_cap=c.settings.relay_backoff_cap_seconds,
-            # El CRM volvió: los turnos que lo esperaban no aguardan su espera.
-            al_volver=partial(reanudar_pendientes, c),
-        )
         followup_worker = FollowupWorker(c)
         sender_worker = SenderWorker(c)
         workers = [
+            asyncio.create_task(run_dispatch_worker(c), name="dispatch-worker"),
             asyncio.create_task(followup_worker.run(), name="followup-worker"),
             asyncio.create_task(sender_worker.run(), name="sender-worker"),
         ]
-        if c.settings.cloud_mode:
-            workers.append(asyncio.create_task(run_dispatch_worker(c), name="dispatch-worker"))
-        # El relay reenvía al CRM el payload crudo de Meta. En cloud el CRM YA
-        # tiene el mensaje —él lo recibió y él nos lo despachó—, así que
-        # reenviárselo sería duplicarlo en la bandeja del cliente.
-        if not c.settings.cloud_mode:
-            workers.insert(
-                0, asyncio.create_task(relay_worker.run(), name="relay-worker")
-            )
         logger.info(
-            "Nea arriba (%s): %sfollowup + sender corriendo",
+            "Nea arriba (%s): despacho + seguimiento + envíos pendientes corriendo",
             (
                 "cloud multi-organización"
                 if c.settings.multi_org
-                else "cloud" if c.settings.cloud_mode else "meta"
+                else "cloud" if c.settings.cloud_mode else "estándar"
             ),
-            "" if c.settings.cloud_mode else "relay + ",
         )
         try:
             yield
@@ -290,10 +245,6 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             for task in workers:
                 task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
-            await relay_worker.aclose()
-            if c.coalescer is not None:
-                await c.coalescer.aclose()
-            await cancelar_pendientes(c)
             if own_resources:
                 await c.crm.aclose()
                 if c.registro is not None:
@@ -302,20 +253,16 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     app = FastAPI(title="Nea — agente de agendamiento para WhatsApp", lifespan=lifespan)
     app.state.ctx = ctx
-    if ctx is not None:
-        _wire_coalescer(ctx)
-    # La entrada del despacho solo existe en cloud. Montarla siempre dejaría
-    # una ruta pública de más en cada instalación que no la usa.
-    if (ctx.settings if ctx is not None else Settings()).cloud_mode:
-        app.include_router(dispatch_router)
-    else:
-        app.include_router(webhook_router)
+    # La única entrada, en los dos modos (spec 031). Y el webhook de Meta, que
+    # ya no se recibe, contesta 503 para que Meta reintente mientras quien
+    # instala lo devuelve al CRM.
+    app.include_router(dispatch_router)
+    app.include_router(webhook_retirado_router)
 
     @app.get("/health")
     async def health(request: Request):  # type: ignore[no-untyped-def]
         # El código HTTP lo decide SOLO la base: es lo que mira el HEALTHCHECK
-        # del Dockerfile, y una cola atrasada del relay no se arregla
-        # reiniciando el contenedor. Lo demás es para quien lo lea (el CRM).
+        # del Dockerfile. Lo demás es para quien lo lea (el CRM).
         c: AppContext | None = request.app.state.ctx
         if c is None:
             return JSONResponse(
@@ -330,11 +277,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 {"status": "degraded", "db": "error", **identidad}, status_code=503
             )
         cuerpo: dict[str, Any] = {"status": "ok", "db": "ok", **identidad}
-        # El relay solo corre en el modo de siempre (en cloud el CRM ya tiene
-        # el mensaje): ahí, ¿cuántos entrantes esperan llegar al CRM, desde
-        # cuándo, y cuándo falló la última entrega?
-        if not c.settings.cloud_mode:
-            cuerpo["relay"] = await _estado_del_relay(c)
+        # 031 — ¿Meta le sigue mandando el webhook a Nea? Si sí, alguien
+        # actualizó sin devolvérselo al CRM (app/webhook_retirado.py).
+        ultimo = c.webhook_meta_ultimo
+        cuerpo["webhookDeMeta"] = {
+            "ultimoEn": ultimo.isoformat(timespec="seconds") if ultimo else None
+        }
         return cuerpo
 
     return app

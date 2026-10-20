@@ -4,7 +4,72 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
-## Sin publicar
+## Sin publicar (será 2.0.0)
+
+Versión mayor: **hay algo que hacer a mano al actualizar** (abajo, «Actualizar
+desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
+
+### Cambió
+
+- **Nea ya no recibe el webhook de Meta: el CRM se lo despacha.** Meta (y
+  Zernio) le escriben al CRM; el CRM guarda el mensaje, junta la ráfaga y se la
+  entrega a Nea firmada en `POST /vocero/dispatch`. Contra Vocero raíz la firma
+  es `CRM_BOT_API_KEY`, la misma llave con la que Nea ya le contesta: no hay un
+  secreto nuevo. Es la entrada que Vocero Cloud ya usaba.
+- **Un CRM que no contesta al empezar el turno ya no se reintenta aquí.** Nea
+  1.x repetía la ráfaga hasta diez minutos porque el relay podía no haberle
+  entregado el mensaje al CRM todavía. Con el despacho, el CRM acaba de
+  mandarlo: si no contesta, la cola del despacho le pasa la conversación a
+  una persona (motivo `error`) en cuanto vuelva.
+
+### Nuevo
+
+- **Instagram, Messenger y TikTok.** Todo lo que el CRM despacha le llega a
+  Nea, y el prompt nombra el canal (`conversation.channel`): un DM de
+  Instagram no se contesta «por WhatsApp». En WhatsApp el chasis no cambia ni
+  un byte.
+- **Lo que el webhook daba, ahora llega del CRM**: el anuncio de origen
+  (`adOrigen` del contexto), la ubicación, los nombres de las tarjetas de
+  contacto y el nombre del documento (llaves nuevas del despacho, vocero-crm
+  031). La nota de voz se reconoce por su tipo (`audio/ogg`).
+- **`DATABASE_SCHEMA`**: con `nea`, Nea guarda sus tablas en ese esquema y
+  puede usar la misma base del CRM. Vacía, `public`, como siempre.
+- **Un mensaje repetido en dos despachos se lee una vez también contra la
+  raíz** (antes, solo en cloud).
+- `/health` gana `webhookDeMeta.ultimoEn`: cuándo le llegó a Nea un webhook de
+  Meta, que desde la 2.0 ya no debería llegarle.
+
+### Se quitó
+
+- `app/webhook.py`, `app/relay.py`, `app/coalesce.py`, el bloque `relay` de
+  `/health` y las variables `META_APP_SECRET`, `VERIFY_TOKEN`,
+  `CRM_WEBHOOK_URL`, `RELAY_BACKOFF_CAP_SECONDS`, `COALESCE_SECONDS`,
+  `TYPING_DELAY_SECONDS` y `TURN_RETRY_DELAYS`. Si siguen en el entorno, Nea
+  lo avisa al arrancar (solo los nombres, nunca los valores).
+- La tabla `relay_queue` se queda, sin uso, por si guardaba algo sin entregar
+  al actualizar. Se borra en una versión siguiente.
+- `POST /webhook` responde **503** (no 404): si Meta todavía le escribe a Nea,
+  reintenta en vez de dar el mensaje por entregado, y el log dice qué hacer.
+
+### Actualizar desde 1.x
+
+En este orden, para no perder mensajes:
+
+1. **CRM**: `BRAIN_DISPATCH_URL=https://<nea>/vocero/dispatch` (o
+   `http://nea:8000/vocero/dispatch` en la misma red) y redeploy. `BOT_API_KEY`
+   ya lo tiene. Con el despacho activo, el agente incluido se calla solo.
+2. **Meta**: quita el override del número que apuntaba a Nea
+   (`POST /{PHONE_NUMBER_ID}` con `"override_callback_uri": ""`). Los webhooks
+   vuelven al override de la WABA, el del CRM. Compruébalo con
+   `GET /{PHONE_NUMBER_ID}?fields=webhook_configuration`.
+3. **Nea**: la imagen `2.0.0`. Puedes quitar las variables de «Se quitó».
+
+Si haces el 3 antes que el 2, no se pierde nada: Nea le contesta 503 a Meta,
+Meta reintenta, y `/health` enseña `webhookDeMeta.ultimoEn` hasta que muevas
+el webhook.
+
+Nea 1.x frente a un Vocero 2.0 sigue funcionando mientras no actualices:
+`/api/bot/*` no cambió.
 
 ### Arreglado
 
