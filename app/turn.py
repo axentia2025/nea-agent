@@ -33,7 +33,7 @@ from app.stall import (
 from app.profile import resolve_profile
 from app.prompt import build_system_prompt, zona_del_negocio
 from app.state import AppContext, BotMessage, InboundMessage, utcnow
-from app.tools import ToolRuntime, tool_schemas
+from app.tools import ToolRuntime, solo_encendidas, tool_schemas
 
 logger = logging.getLogger("nea.turn")
 
@@ -368,6 +368,11 @@ async def run_turn(
     referral = next((m.referral_headline for m in inbound if m.referral_headline), None)
     offered = await ctx.store.get_offered_slots(conv.id)
     profile = await resolve_profile(ctx)
+    # 034 — Con «agendar» apagada en el CRM, el turno se porta como contra un
+    # CRM sin agenda: no se le enseñan las herramientas y el prompt dice que
+    # por aquí no se agenda.
+    if not profile.permite("agendar"):
+        ctx.agenda_enabled = False
     # La zona es la del negocio de ESTE turno (la manda el CRM), no la de la
     # instancia: una Nea atiende a negocios de zonas distintas.
     tz = zona_del_negocio(context, _agent_tz(settings))
@@ -715,7 +720,15 @@ async def _tool_loop(
     """
     for _ in range(MAX_TOOL_ROUNDS):
         reply = await ctx.llm.complete(
-            messages, tools=tool_schemas(ctx.agenda_enabled, bool(getattr(ctx.crm, "supports_agenda_v2", False)), bool(getattr(ctx.crm, "supports_coordination", False)))
+            messages,
+            tools=solo_encendidas(
+                tool_schemas(
+                    ctx.agenda_enabled,
+                    bool(getattr(ctx.crm, "supports_agenda_v2", False)),
+                    bool(getattr(ctx.crm, "supports_coordination", False)),
+                ),
+                getattr(runtime, "_profile", None),
+            ),
         )
         if not reply.tool_calls:
             return reply.content  # turno de puro texto

@@ -219,6 +219,32 @@ AGENDA_V2_SCHEMAS = [
 # Herramientas que solo tienen sentido si el CRM agenda.
 AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"})
 
+# 034 — De qué clave del catálogo del CRM es cada herramienta. Una que no esté
+# aquí no se puede apagar desde el CRM.
+CLAVE_DE_HERRAMIENTA = {
+    "update_ficha": "ficha",
+    "propose_slots": "agendar",
+    "book_session": "agendar",
+    "list_bookings": "agendar",
+    "cancel_session": "agendar",
+    "coordination_consent": "agendar",
+    "reschedule_session": "reprogramar",
+    "route_out": "salida",
+    "handoff": "escalar",
+}
+
+
+def solo_encendidas(schemas: list[dict[str, Any]], profile: Any) -> list[dict[str, Any]]:
+    """Las herramientas que el perfil deja encendidas (034)."""
+    permite = getattr(profile, "permite", None)
+    if not callable(permite):
+        return schemas
+    return [
+        t
+        for t in schemas
+        if permite(CLAVE_DE_HERRAMIENTA.get(t.get("function", {}).get("name", ""), "escalar"))
+    ]
+
 
 def tool_schemas(agenda_enabled: bool = True, agenda_v2: bool = False, coordination: bool = False) -> list[dict[str, Any]]:
     """El catálogo que se le ofrece al modelo en ESTE turno.
