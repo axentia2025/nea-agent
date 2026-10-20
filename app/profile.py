@@ -53,6 +53,12 @@ class BusinessProfile:
     # CRM que todavía no las manda.
     role: str = "calificador"
     tools: frozenset[str] | None = None
+    # 036 — Con qué piensa el negocio cuando Nea piensa por el CRM (bloque
+    # `llm` del perfil): la ruta del proxy y el modelo de Ajustes → IA. `None`
+    # = el CRM no tiene IA configurada, o no lo dice (un CRM anterior, el
+    # brief local): Nea usa `LLM_MODEL`.
+    llm_path: str | None = None
+    llm_model: str | None = None
 
     def permite(self, clave: str) -> bool:
         """¿Está encendida esta herramienta? `escalar` siempre lo está: es la
@@ -88,7 +94,24 @@ def profile_from_payload(payload: dict[str, Any], default_name: str) -> Business
         resources=resources,
         role=str(prof.get("role") or "calificador"),
         tools=_herramientas(prof.get("tools")),
+        **_ia(payload.get("llm")),
     )
+
+
+def _ia(valor: Any) -> dict[str, str | None]:
+    """El bloque `llm` del perfil (036): `{path, model}` o `null`.
+
+    La ruta solo se acepta si es una ruta (`/…`): se pega detrás de
+    `CRM_BASE_URL`, y otra cosa cambiaría el host al que viaja la llave.
+    """
+    if not isinstance(valor, dict):
+        return {"llm_path": None, "llm_model": None}
+    path = valor.get("path")
+    model = valor.get("model")
+    return {
+        "llm_path": path if isinstance(path, str) and path.startswith("/") else None,
+        "llm_model": (model.strip() or None) if isinstance(model, str) else None,
+    }
 
 
 def _herramientas(valor: Any) -> frozenset[str] | None:

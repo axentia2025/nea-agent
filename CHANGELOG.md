@@ -47,6 +47,17 @@ desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
   agendar, reprogramar, salida; escalar va siempre). Sin «agendar», se porta
   como contra un CRM sin agenda. El cambio llega cuando Nea relee el perfil
   (cada 5 minutos), sin redesplegar. Sin `tools`, todas, como antes.
+- **`LLM_API_KEY` es opcional junto a Vocero 2.0** (vocero-crm 036). Vacía,
+  Nea piensa por el CRM: la llave vive en Ajustes → IA del CRM y no viaja
+  hasta aquí; Nea llama a `{CRM_BASE_URL}/api/bot/llm` con `CRM_BOT_API_KEY`
+  y usa el modelo que el perfil dice (`llm.model`), o `LLM_MODEL` si no trae.
+  Cambiar el modelo en el CRM llega al releer el perfil (cada 5 minutos), sin
+  redesplegar. Sin IA configurada en el CRM (402 `sin_credencial`), Nea calla
+  y le pasa la conversación a una persona (motivo `error`). Con `LLM_API_KEY`
+  puesta no cambia nada. Las notas de voz van por el mismo camino con
+  `LLM_TRANSCRIBE_MODEL` (un modelo que oiga, no `whisper-1`). En modo cloud
+  no cambia nada.
+- `/health` gana `llm`: `"crm"` o `"propia"` (sin llaves ni URLs).
 
 ### Se quitó
 

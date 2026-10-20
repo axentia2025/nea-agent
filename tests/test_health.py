@@ -43,6 +43,7 @@ async def test_por_defecto():
         "db": "ok",
         "version": "dev",
         "mode": "estándar",
+        "llm": "propia",
         "webhookDeMeta": {"ultimoEn": None},
     }
 
