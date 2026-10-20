@@ -495,7 +495,13 @@ class TestAudio:
         assert s.audio_mal_configurado is False
 
     def test_con_openai_nunca_avisa(self) -> None:
-        assert Settings().audio_mal_configurado is False
+        # Con llave propia y sin LLM_BASE_URL: OpenAI, donde whisper-1 existe.
+        # Explícita: sin llave, desde la 036 Nea piensa por el CRM (y ahí sí
+        # avisa), y en Windows OPENAI_API_KEY del entorno la rellenaba sola.
+        assert Settings(llm_api_key="sk-propia").audio_mal_configurado is False
+
+    def test_pensando_por_el_crm_con_whisper_avisa(self) -> None:
+        assert Settings(llm_api_key="").audio_mal_configurado is True
 
     @respx.mock
     async def test_transcribe_pidiendo_SOLO_el_texto(self) -> None:
