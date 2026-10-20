@@ -24,3 +24,11 @@ avisos conocidos; sigue pendiente un lock de transitivas con hashes.
 del contenedor dev se permite `--dev-runtime` solamente si CRM_BASE_URL apunta a
 vocero-cloud-dev o dev.vocerocrm.com. Crea/elimina su propia base aleatoria y no
 usa las conversaciones de la app. No imprime credenciales.
+
+## Actualización 2.0 (spec 031 de vocero-crm, 2026-10-19)
+
+El despacho firmado y durable es ahora la única entrada, también en estándar
+(firma con `CRM_BOT_API_KEY`). `/webhook` ya no valida a Meta: responde 503 para
+que Meta reintente mientras quien actualiza le devuelve el webhook al CRM, y
+`META_APP_SECRET` dejó de leerse. El retry previo a leer el contexto se quitó:
+estándar usa la misma política de handoff durable que cloud.

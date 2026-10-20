@@ -120,9 +120,9 @@ async def test_el_reintento_del_mismo_despacho_sigue_cubierto_por_su_id(monkeypa
     await ctx.crm.aclose()
 
 
-async def test_fuera_de_cloud_no_se_anota_nada(monkeypatch):
-    # En el modo de siempre el dedup es el del webhook, por wamid. Este camino
-    # no debe dejar marcas ahí.
+async def test_contra_la_raiz_tambien_se_anota(monkeypatch):
+    # 031 — Desde la 2.0 la raíz también despacha, y también repite la ráfaga
+    # completa: lo leído se anota igual que en cloud (sin organización).
     from app.state import InboundMessage
     from app.turn import run_turn
 
@@ -139,7 +139,7 @@ async def test_fuera_de_cloud_no_se_anota_nada(monkeypatch):
         [InboundMessage(wa_message_id="wamid.1", identity=IDENTIDAD, type="text", text="hola")],
     )
 
-    assert ctx.store.processed == set()
+    assert ctx.store.processed == {"msg::wamid.1"}
     await ctx.crm.aclose()
 
 

@@ -2,7 +2,7 @@
 
 Endpoints:
   GET  /api/bot/profile                               → agent profile + KB (404 = sin perfil)
-  GET  /api/bot/context?waIdentity=...
+  GET  /api/bot/context?conversationId=... (o ?waIdentity=...)
   POST /api/bot/messages   {conversationId, text}   → 409 ai_paused|window_closed
   PUT  /api/bot/ficha      {conversationId, ficha}
   POST /api/bot/handoff    {conversationId, reason}
@@ -193,6 +193,14 @@ class CrmClient:
             headers={"X-API-Key": api_key},
             timeout=timeout,
         )
+        # 031 — De qué conversación es cada identidad, según el despacho. Con
+        # ella el contexto se pide por conversación y no por persona: es la
+        # que el CRM despachó, aunque esa persona tenga otra.
+        self._conversaciones: dict[str, str] = {}
+
+    def registrar(self, identity: str, conversation_id: str) -> None:
+        """Asocia una identidad con su conversación, desde el despacho."""
+        self._conversaciones[identity] = conversation_id
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -201,10 +209,18 @@ class CrmClient:
             raise CrmUnreachable(f"error de red hacia el CRM: {exc}") from exc
 
     async def get_context(self, wa_identity: str) -> dict[str, Any] | None:
-        """Contexto conversacional; None si el CRM aún no conoce la identidad (404)."""
-        resp = await self._request(
-            "GET", "/api/bot/context", params={"waIdentity": wa_identity}
+        """Contexto conversacional; None si el CRM no la conoce (404).
+
+        Por la conversación que trajo el despacho si la hay; si no (el
+        seguimiento despierta horas después, sin despacho), por identidad.
+        """
+        conversation_id = self._conversaciones.get(wa_identity)
+        params = (
+            {"conversationId": conversation_id}
+            if conversation_id
+            else {"waIdentity": wa_identity}
         )
+        resp = await self._request("GET", "/api/bot/context", params=params)
         if resp.status_code == 404:
             return None
         if es_caida(resp.status_code):

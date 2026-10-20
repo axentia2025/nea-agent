@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """Prueba de punta a punta de Nea contra Vocero raíz, en modo estándar.
 
-El par tal como se instala: Meta manda el webhook a Nea, Nea lo releva al CRM
-y contesta por `/api/bot/*`, y el CRM envía por la Graph API — aquí, el
+El par tal como se instala desde la 2.0 (spec 031): Meta manda el webhook al
+CRM, el CRM guarda el mensaje y se lo DESPACHA a Nea (`BRAIN_DISPATCH_URL`),
+Nea contesta por `/api/bot/*`, y el CRM envía por la Graph API — aquí, el
 wa-mock del propio CRM, así que nada sale a Meta ni a WhatsApp. Este guion
 hace de Meta y de cliente: arma los payloads con la forma real de la Cloud
-API, los firma con META_APP_SECRET como Meta, y comprueba lo observable en la
-API del CRM, su base y el outbox del wa-mock.
+API, los firma con META_APP_SECRET como Meta, se los entrega al CRM, y
+comprueba lo observable en la API del CRM, su base y el outbox del wa-mock.
 
 Levanta el CRM (`next dev`) y Nea (uvicorn) con un entorno fabricado para la
 corrida (secretos aleatorios de prueba), pone entre Nea y OpenRouter un
 medidor local que cuenta los tokens y corta al llegar al presupuesto, corre
-los escenarios y apaga todo al salir. El Postgres —dos bases, una para cada
-servicio— lo pone quien corre la prueba.
+los escenarios y apaga todo al salir. El Postgres lo pone quien corre la
+prueba: UNA base para los dos, con Nea en su esquema `nea`
+(`DATABASE_SCHEMA`), que es como se instala el par. `NEA_DATABASE_URL` es
+opcional: con ella, Nea usa esa otra base (también en el esquema `nea`).
 
 La llave del modelo sale de `LLM_API_KEY` en el entorno o de un `--env-file`;
 nunca por argv, y nunca se imprime.
@@ -69,6 +72,10 @@ OPERADOR = {
     "name": "Operador E2E",
 }
 CLAVES_DE_ARCHIVO = ("LLM_API_KEY", "CRM_DATABASE_URL", "NEA_DATABASE_URL")
+# Sin estas no se monta el par. NEA_DATABASE_URL es opcional: una base basta.
+CLAVES_OBLIGATORIAS = ("LLM_API_KEY", "CRM_DATABASE_URL")
+# El esquema de Nea en la base (DATABASE_SCHEMA).
+ESQUEMA_NEA = "nea"
 # Nada del entorno de quien corre la prueba que huela a secreto o a
 # configuración de uno de los dos servicios llega a los procesos hijos: cada
 # variable que leen la pone este guion.
@@ -526,14 +533,18 @@ class Crm:
         self.cookies: dict[str, str] = {}
         self.http = httpx.Client(timeout=90)
 
-    def api(self, metodo: str, ruta: str, *, cuerpo: Any = None, bot: bool = False, headers: dict[str, str] | None = None, timeout: float = 90) -> httpx.Response:
+    def api(self, metodo: str, ruta: str, *, cuerpo: Any = None, contenido: bytes | None = None, bot: bool = False, headers: dict[str, str] | None = None, timeout: float = 90) -> httpx.Response:
         h = {"origin": self.base}  # Better Auth valida Origin
         if self.cookies:
             h["cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
         if bot:
             h["x-api-key"] = self.bot_key
         h.update(headers or {})
-        r = self.http.request(metodo, self.base + ruta, json=cuerpo, headers=h, timeout=timeout)
+        # `contenido`: bytes ya firmados (el webhook de «Meta»); se mandan tal cual.
+        if contenido is not None:
+            r = self.http.request(metodo, self.base + ruta, content=contenido, headers=h, timeout=timeout)
+        else:
+            r = self.http.request(metodo, self.base + ruta, json=cuerpo, headers=h, timeout=timeout)
         for c in r.headers.get_list("set-cookie"):
             par = c.split(";", 1)[0]
             if "=" in par:
@@ -578,7 +589,7 @@ class Prueba:
         self.args = args
         self.llave = valores["LLM_API_KEY"]
         self.crm_db = valores["CRM_DATABASE_URL"]
-        self.nea_db = valores["NEA_DATABASE_URL"]
+        self.nea_db = valores.get("NEA_DATABASE_URL") or self.crm_db
         self.out = Path(args.out).resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.crm_dir = Path(args.crm_dir).resolve()
@@ -587,10 +598,9 @@ class Prueba:
         self.sec = {
             "bot": secrets.token_hex(32),
             "webhook": secrets.token_hex(16),
-            "app": secrets.token_hex(24),  # META_APP_SECRET, el mismo en los dos
+            "app": secrets.token_hex(24),  # META_APP_SECRET del CRM: firma lo que manda «Meta»
             "auth": secrets.token_hex(32),
             "cifrado": base64.b64encode(secrets.token_bytes(32)).decode(),
-            "verify": secrets.token_hex(16),
         }
         corrida = secrets.token_hex(2)
         self.clientes = {
@@ -626,7 +636,8 @@ class Prueba:
         self.medidor.arrancar(self.args.medidor_port)
 
         # CRM: migraciones y `next dev` con la bandera de agenda, el wa-mock
-        # como Graph API y SIN proveedor de IA propio (Nea es el único cerebro).
+        # como Graph API, el despacho hacia Nea y SIN proveedor de IA propio
+        # (Nea es el único cerebro).
         env = entorno_base() | {
             "NODE_ENV": "development",
             "NEXT_TELEMETRY_DISABLED": "1",
@@ -640,6 +651,7 @@ class Prueba:
             "META_GRAPH_BASE_URL": f"{self.crm_url}/api/dev/wa-mock/graph",
             "WA_MOCK_ENABLED": "true",
             "BOT_API_KEY": self.sec["bot"],
+            "BRAIN_DISPATCH_URL": f"http://127.0.0.1:{self.args.nea_port}/vocero/dispatch",
             "AGENDA": "on",
             "MEDIA_DIR": str(self.out / "crm-media"),
         }
@@ -694,18 +706,17 @@ class Prueba:
             raise RuntimeError(f"Ajustes → Agenda ({st}): {cuerpo}")
 
         # Nea en modo estándar, fuera de su carpeta: así no lee ningún `.env`
-        # que alguien haya dejado ahí; todo lo que usa lo pone este guion.
+        # que alguien haya dejado ahí; todo lo que usa lo pone este guion. Sin
+        # nada de Meta: desde la 2.0 el webhook es del CRM.
         commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=RAIZ_NEA, capture_output=True, text=True).stdout.strip()
         nea_env = entorno_base() | {
             "PYTHONPATH": str(RAIZ_NEA),
             "PYTHONUNBUFFERED": "1",
             "PYTHONUTF8": "1",
-            "VERIFY_TOKEN": self.sec["verify"],
-            "META_APP_SECRET": self.sec["app"],
             "CRM_BASE_URL": self.crm_url,
-            "CRM_WEBHOOK_URL": f"{self.crm_url}/api/webhooks/wa/{self.sec['webhook']}",
             "CRM_BOT_API_KEY": self.sec["bot"],
             "DATABASE_URL": self.nea_db,
+            "DATABASE_SCHEMA": ESQUEMA_NEA,
             "LLM_API_KEY": self.llave,
             "LLM_BASE_URL": f"http://127.0.0.1:{self.args.medidor_port}/api/v1",
             "LLM_MODEL": self.args.modelo,
@@ -782,15 +793,17 @@ class Prueba:
     # ── El cliente y Meta ───────────────────────────────────────────────────
 
     def _postear(self, payload: dict[str, Any]) -> float:
+        """Lo que hace Meta: el webhook firmado, al CRM (desde la 2.0, nunca a Nea)."""
         cuerpo = json.dumps(payload, ensure_ascii=False).encode()
-        r = self.nea.post(
-            "/webhook",
-            content=cuerpo,
+        r = self.crm.api(
+            "POST",
+            f"/api/webhooks/wa/{self.sec['webhook']}",
+            contenido=cuerpo,
             headers={"content-type": "application/json", "x-hub-signature-256": firmar(self.sec["app"], cuerpo)},
         )
         t = time.time()
         if r.status_code != 200:
-            raise RuntimeError(f"Nea rechazó el webhook ({r.status_code}): {r.text[:200]}")
+            raise RuntimeError(f"el CRM rechazó el webhook ({r.status_code}): {r.text[:200]}")
         return t
 
     def enviar(self, c: Cliente, texto: str) -> float:
@@ -942,9 +955,9 @@ class Prueba:
         a = self.clientes["A"]
         texto = "Hola, buenas tardes, ¿qué servicios tienen?"
         t0 = self.enviar(a, texto)
-        relay_s = self.esperar_entrante(a, texto, t0, 30)
+        bandeja_s = self.esperar_entrante(a, texto, t0, 30)
         resp = self.esperar_respuesta(a, t0, "1: primer contacto")
-        ev: dict[str, Any] = {"relay_a_bandeja_s": relay_s, "conversationId": a.conv_id, "respuestas": resp}
+        ev: dict[str, Any] = {"a_la_bandeja_s": bandeja_s, "conversationId": a.conv_id, "respuestas": resp}
         if not resp:
             return False, ev
         a.ultima_salida = resp[-1]
@@ -956,8 +969,8 @@ class Prueba:
         ]
         ev["markdown"] = sorted({x for s in resp for x in artefactos_markdown(s["texto"])})
         ok = (
-            relay_s is not None
-            and relay_s <= 10
+            bandeja_s is not None
+            and bandeja_s <= 10
             and all(m and m.get("origin") == "ai" and m.get("status") in ("pending", "sent") for m in en_crm)
             and not ev["markdown"]
         )
@@ -1107,118 +1120,68 @@ class Prueba:
         )
         return ok, ev
 
-    def e7_crm_caido(self) -> tuple[bool, dict[str, Any]]:
-        """El CRM se apaga ~20 s y el cliente escribe dos veces mientras tanto.
+    def e7_nea_caida(self) -> tuple[bool, dict[str, Any]]:
+        """Nea se apaga y el cliente escribe.
 
-        El relay encola los dos payloads y los entrega al volver; el turno,
-        que no alcanzó al CRM, se reintenta con la ráfaga completa. Lo que se
-        exige: los dos entrantes en la bandeja y UNA respuesta de Nea que
-        contesta los dos (un solo mensaje del lead en su historial, con los
-        dos textos), sin una segunda respuesta detrás.
+        El CRM guarda el mensaje igual (ya no depende de Nea para recibir),
+        intenta el despacho tres veces y, agotadas, le pasa la conversación a
+        una persona con motivo `error`. Nea vuelve al final para los demás
+        escenarios.
         """
         c = self.clientes["C"]
-        assert self.proc_crm is not None
-        self.proc_crm.detener()
-        if not hasta(lambda: not puerto_ocupado(self.args.crm_port), 30):
-            return False, {"error": "el CRM no soltó el puerto al detenerlo"}
-        self.nota(c, "CRM detenido")
+        assert self.proc_nea is not None
+        self.proc_nea.detener()
+        if not hasta(lambda: not puerto_ocupado(self.args.nea_port), 30):
+            return False, {"error": "Nea no soltó el puerto al detenerla"}
+        self.nota(c, "Nea detenida")
         texto = "Hola, quisiera informes de sus servicios"
-        segundo = "¿Y cuánto cuesta la página web?"
         t0 = self.enviar(c, texto)
-        t_segundo: float | None = None
-        cola = []
-        fin = time.monotonic() + 20  # la caída que se simula: ~20 s
-        while time.monotonic() < fin:
-            if t_segundo is None and time.time() - t0 >= 8:
-                # Pasado el coalesce del primero: abre su propio turno, que
-                # tampoco alcanza al CRM y se lleva la ráfaga que esperaba.
-                t_segundo = self.enviar(c, segundo)
-            try:
-                cola.append((self.salud_nea().get("relay") or {}).get("pendientes"))
-            except httpx.HTTPError:
-                cola.append(None)
-            time.sleep(2)
-        self.nota(c, "CRM arrancando de nuevo")
-        self.arrancar_crm(calentar=False)
-        self.nota(c, "CRM contesta /api/health")
-        # La entrega la marca la cola de Nea: `pendientes` vuelve a 0 cuando el
-        # CRM aceptó los payloads. Se mira antes de compilar nada más.
-        vacia = hasta(lambda: (self.salud_nea().get("relay") or {}).get("pendientes") == 0, 180, 0.5)
-        entregado_en = time.time() if vacia else None
-        if entregado_en:
-            self.nota(c, f"relay entregado al CRM ({entregado_en - self.crm_sano_en:.1f} s después de que el CRM volvió)")
-        self.calentar()
-        llegadas = [self.esperar_entrante(c, x, t0, 120) for x in (texto, segundo)]
-        if all(x is not None for x in llegadas):
-            self.nota(c, "los dos entrantes están en la bandeja del CRM")
-        # Los reintentos de Nea suman como mucho 10 min (TURN_RETRY_DELAYS);
-        # esta respuesta no cuenta para la latencia por turno: la mide la caída.
-        r = self.esperar_respuesta(c, t0, None, timeout=600)
-        respondio_en = instante(r[0]["at"]) if r else None
-        otra = self.esperar_silencio(c, time.time(), 30) if r else []
-        conv = self.conversacion(c) or {}
-        historial = consulta(
-            self.nea_db,
-            "select m.content from bot_message m join bot_conversation v on v.id = m.conversation_id "
-            "where v.wa_identity = $1 and m.role = 'user' order by m.id",
-            c.canonico,
-        )
-        del_lead = [h["content"] for h in historial]
-        log = (self.out / "nea.log").read_text(encoding="utf-8", errors="replace").splitlines()
-        ev = {
-            "pendientes_en_relay_durante_la_caida": cola,
-            "crm_de_vuelta_tras_s": round(self.crm_sano_en - t0, 1),
-            "relay_entregado_tras_volver_s": round(entregado_en - self.crm_sano_en, 1) if entregado_en else None,
-            "segundo_mensaje_tras_s": round(t_segundo - t0, 1) if t_segundo else None,
-            "entrantes_en_bandeja": [x is not None for x in llegadas],
-            "respuesta_tras_volver_el_crm_s": round(respondio_en - self.crm_sano_en, 1) if respondio_en else None,
-            "respuestas": r,
-            "segunda_respuesta": otra,
-            "mensajes_del_lead_en_nea": del_lead,
-            "handoff": {k: conv.get(k) for k in ("handoffAt", "handoffReason", "aiEnabled")},
-            "log_nea": [
-                linea[-240:]
-                for linea in log
-                if c.canonico in linea and ("reintento" in linea or "ráfaga" in linea or "CRM no" in linea)
-            ][-12:],
-        }
+        en_bandeja = self.esperar_entrante(c, texto, t0, 30)
+        conv = hasta(lambda: (v := self.conversacion(c)) and v.get("handoffAt") and v, 90) or self.conversacion(c) or {}
+        self.nota(c, f"CRM: handoffAt={conv.get('handoffAt')} motivo={conv.get('handoffReason')} aiEnabled={conv.get('aiEnabled')}")
+        nadie = self.esperar_silencio(c, time.time(), 5)
+        self.proc_nea.arrancar()
+        volvio = bool(hasta(lambda: self.nea.get("/health").status_code == 200, 90, 0.5))
+        self.nota(c, "Nea de vuelta" if volvio else "Nea NO volvió")
         checks = {
-            "relay_encolo_durante_la_caida": max((x or 0) for x in cola) >= 1,
-            "relay_entrego_al_volver": entregado_en is not None,
-            "los_dos_entrantes_en_la_bandeja": all(x is not None for x in llegadas),
-            "el_cliente_recibio_respuesta": bool(r),
-            "una_sola_respuesta": bool(r) and not otra,
-            "un_turno_con_los_dos_mensajes": len(del_lead) == 1 and texto in del_lead[0] and segundo in del_lead[0],
-            "sin_handoff": not conv.get("handoffAt"),
+            "el_mensaje_esta_en_la_bandeja": en_bandeja is not None,
+            "la_conversacion_paso_a_una_persona": bool(conv.get("handoffAt")) and conv.get("aiEnabled") is False,
+            "con_motivo_error": conv.get("handoffReason") == "error",
+            "nadie_contesto_por_nea": not nadie,
+            "nea_volvio": volvio,
         }
-        ev["checks"] = checks
+        ev = {
+            "a_la_bandeja_s": en_bandeja,
+            "handoff": {k: conv.get(k) for k in ("handoffAt", "handoffReason", "aiEnabled")},
+            "checks": checks,
+        }
         return all(checks.values()), ev
 
-    def e8_override(self) -> tuple[bool, dict[str, Any]]:
-        ruta = f"/api/dev/wa-mock/graph/v25.0/{WABA}/subscribed_apps"
-        como_meta = {"authorization": f"Bearer {TOKEN_WA}"}
-        nea_webhook = f"http://localhost:{self.args.nea_port}/webhook"
-
-        def override() -> str | None:
-            apps = self.crm.json("GET", ruta, headers=como_meta)[1].get("data") or []
-            return next((x.get("override_callback_uri") for x in apps if x.get("override_callback_uri")), None)
-
-        st_fijar, _ = self.crm.json("POST", ruta, headers=como_meta, cuerpo={"override_callback_uri": nea_webhook, "verify_token": self.sec["verify"]})
-        antes = override()
-        st_guardar, cuerpo = self.crm.json("PUT", "/api/settings/whatsapp", cuerpo={"wabaId": WABA, "phoneNumberId": PN, "token": TOKEN_WA})
-        despues = override()
-        ev = {"fijar": st_fijar, "override_antes": antes, "guardar_conexion": st_guardar, "override_despues": despues}
-        if st_guardar != 200:
-            ev["respuesta"] = cuerpo
-        return antes == nea_webhook and st_guardar == 200 and despues == nea_webhook, ev
+    def e8_nea_sin_webhook(self) -> tuple[bool, dict[str, Any]]:
+        """Un webhook de Meta que todavía apunte a Nea: 503 para que Meta
+        reintente, aviso en el log y en `/health`. Y la verificación de Meta
+        ya no se le contesta."""
+        cuerpo = json.dumps(envoltura({"statuses": []})).encode()
+        r = self.nea.post("/webhook", content=cuerpo, headers={"content-type": "application/json"})
+        verificacion = self.nea.get("/webhook", params={"hub.mode": "subscribe", "hub.verify_token": "x", "hub.challenge": "1"})
+        salud = self.salud_nea()
+        log = (self.out / "nea.log").read_text(encoding="utf-8", errors="replace")
+        checks = {
+            "webhook_503": r.status_code == 503,
+            "verificacion_404": verificacion.status_code == 404,
+            "health_lo_registra": bool((salud.get("webhookDeMeta") or {}).get("ultimoEn")),
+            "el_log_dice_que_hacer": "devuélvele el webhook al CRM" in log,
+        }
+        return all(checks.values()), {"checks": checks, "webhookDeMeta": salud.get("webhookDeMeta")}
 
     def e9_salud(self) -> tuple[bool, dict[str, Any]]:
-        h = hasta(lambda: (x := self.salud_nea()) and (x.get("relay") or {}).get("pendientes") == 0 and x, 90) or self.salud_nea()
+        h = self.salud_nea()
         ok = (
             h.get("status") == "ok"
             and bool(h.get("version"))
             and h.get("mode") == "estándar"
-            and (h.get("relay") or {}).get("pendientes") == 0
+            and "relay" not in h
+            and "webhookDeMeta" in h
         )
         return ok, {"health": h}
 
@@ -1289,7 +1252,7 @@ def main() -> int:
             pass
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--crm-dir", default=os.environ.get("E2E_CRM_DIR"), help="checkout de vocero-crm con `pnpm install` hecho")
-    p.add_argument("--env-file", action="append", default=[], help="archivo KEY=VALUE del que se leen LLM_API_KEY, CRM_DATABASE_URL y NEA_DATABASE_URL (repetible)")
+    p.add_argument("--env-file", action="append", default=[], help="archivo KEY=VALUE del que se leen LLM_API_KEY, CRM_DATABASE_URL y, opcional, NEA_DATABASE_URL (repetible)")
     p.add_argument("--out", default=None, help="carpeta para transcripciones, logs y resultado.json")
     p.add_argument("--crm-port", type=int, default=3800)
     p.add_argument("--nea-port", type=int, default=8100)
@@ -1302,7 +1265,7 @@ def main() -> int:
         p.error("falta --crm-dir (o E2E_CRM_DIR)")
     args.out = args.out or str(Path.cwd() / f"e2e-contra-raiz-{datetime.now():%Y%m%d-%H%M%S}")
     valores = leer_valores(args.env_file)
-    faltan = [k for k in CLAVES_DE_ARCHIVO if not valores.get(k)]
+    faltan = [k for k in CLAVES_OBLIGATORIAS if not valores.get(k)]
     if faltan:
         print(f"faltan {', '.join(faltan)} (entorno o --env-file)", file=sys.stderr)
         return 2
@@ -1316,15 +1279,15 @@ def main() -> int:
             print(f"no se pudo montar el par: {exc}", file=sys.stderr)
             return 2
         print("par montado: CRM y Nea arriba — corriendo escenarios", flush=True)
-        prueba.correr(1, "primer contacto: relay a la bandeja y respuesta sin Markdown", prueba.e1_primer_contacto)
+        prueba.correr(1, "primer contacto: del CRM a Nea por despacho, respuesta sin Markdown", prueba.e1_primer_contacto)
         prueba.correr(2, "estados delivered y read de la respuesta", prueba.e2_estados)
         prueba.correr(3, "agenda: huecos reales, cita, etapa y enlace fijo", prueba.e3_agenda)
         prueba.correr(4, "contexto: Nea sabe a qué hora quedó la cita y no ofrece recordatorios", prueba.e4_contexto_de_la_cita)
         prueba.correr(5, "handoff a una persona con despedida", prueba.e5_handoff)
         prueba.correr(6, "candado de cierre: despedida, silencio y reapertura", prueba.e6_candado)
-        prueba.correr(7, "CRM caído: el relay entrega y el cliente recibe UNA respuesta al volver", prueba.e7_crm_caido)
-        prueba.correr(8, "guardar la conexión no borra el override de la WABA", prueba.e8_override)
-        prueba.correr(9, "/health de Nea: versión, modo estándar y relay en 0", prueba.e9_salud)
+        prueba.correr(7, "Nea caída: el mensaje queda en la bandeja y pasa a una persona", prueba.e7_nea_caida)
+        prueba.correr(8, "Nea sin webhook: 503 para que Meta reintente, aviso en log y /health", prueba.e8_nea_sin_webhook)
+        prueba.correr(9, "/health de Nea: versión, modo estándar, sin relay", prueba.e9_salud)
     finally:
         prueba.desmontar()
         resultado = prueba.escribir()

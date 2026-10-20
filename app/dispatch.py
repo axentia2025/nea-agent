@@ -1,21 +1,19 @@
-"""Entrada del modo cloud: el CRM le DESPACHA la conversación a Nea.
+"""La entrada de Nea: el CRM le DESPACHA la conversación.
 
-Es la inversión del camino de siempre. Con un Vocero de un solo negocio, Meta
-manda el webhook a Nea y Nea lo relaya al CRM. Con un Vocero multitenant el
-mensaje ya está guardado en la bandeja antes de que Nea lo vea, y el CRM se lo
-entrega firmado.
+Desde la 2.0 es la única. Meta le manda el webhook al CRM, el CRM guarda el
+mensaje, espera a que el cliente termine de escribir y le entrega a Nea la
+ráfaga firmada. Igual contra Vocero raíz que contra Vocero Cloud; lo único que
+cambia es con qué llave viene firmada (`Settings.dispatch_secret`) y por dónde
+se contesta (`/api/bot/*` o `/api/brains/*`).
 
-Eso cambia tres cosas, y las tres para bien:
+Eso quita tres cosas que Nea hacía por estar delante del CRM:
 
-- **No hay relay.** El CRM ya tiene el mensaje; reenviárselo sería duplicarlo.
+- **No hay relay.** El CRM ya tiene el mensaje.
 - **No hay coalesce aquí.** El CRM ya esperó a que el cliente terminara de
   escribir y entrega la ráfaga junta. Volver a esperar en Nea le sumaría
   segundos de silencio a un cliente que ya esperó los del CRM.
 - **No se parsea a Meta.** Llega un evento normalizado, igual para WhatsApp que
-  para Instagram que para lo que venga después.
-
-Esta ruta solo existe con `VOCERO_MODE=cloud`. Sin esa bandera, Nea no la monta
-y su webhook de Meta sigue siendo el de siempre.
+  para Instagram, Messenger, TikTok o lo que venga después.
 """
 from __future__ import annotations
 
@@ -51,8 +49,9 @@ def firma_valida(body: bytes, header: str | None, secret: str) -> bool:
     diferencia y la firma no coincide nunca. Es el error clásico de esta clase
     de integración, y por eso se valida antes de parsear nada.
 
-    Sin secreto configurado se RECHAZA, igual que en el webhook de Meta.
-    La firma prueba que quien despacha conoce la credencial del CRM.
+    Sin secreto configurado se RECHAZA: una Nea sin `CRM_BOT_API_KEY` (o sin
+    `CRM_BRAIN_SECRET` en cloud) no acepta nada. La firma prueba que quien
+    despacha conoce la credencial del CRM.
     """
     if not secret or not header:
         return False
@@ -71,11 +70,13 @@ def mensajes_del_despacho(payload: dict[str, Any]) -> list[InboundMessage]:
     identity = str(contacto.get("identity") or "")
     if not identity:
         return []
+    canal = (payload.get("conversation") or {}).get("channel")
 
     out: list[InboundMessage] = []
     for m in payload.get("messages") or []:
         if not isinstance(m, dict):
             continue
+        mime = m.get("mimeType")
         out.append(
             InboundMessage(
                 wa_message_id=str(m.get("id")) if m.get("id") else None,
@@ -84,11 +85,40 @@ def mensajes_del_despacho(payload: dict[str, Any]) -> list[InboundMessage]:
                 text=m.get("text"),
                 profile_name=contacto.get("displayName"),
                 media_id=m.get("mediaId"),
-                media_mime=m.get("mimeType"),
+                media_mime=mime,
                 media_caption=m.get("caption"),
+                # 031 — Lo que antes salía del webhook de Meta y ahora trae el
+                # CRM, solo cuando aplica.
+                media_filename=m.get("fileName"),
+                # El CRM no guarda la marca `voice` de Meta. Una nota de voz de
+                # WhatsApp es siempre ogg/opus; un audio adjunto casi nunca.
+                media_voice=isinstance(mime, str) and mime.startswith("audio/ogg"),
+                location=_ubicacion(m.get("location")),
+                contact_names=_nombres(m.get("contacts")),
+                channel=str(canal) if canal else None,
             )
         )
     return out
+
+
+def _ubicacion(valor: Any) -> dict[str, Any] | None:
+    """La ubicación del despacho, o None si no trae coordenadas."""
+    if not isinstance(valor, dict):
+        return None
+    if not all(isinstance(valor.get(k), (int, float)) for k in ("latitude", "longitude")):
+        return None
+    return {k: valor[k] for k in ("latitude", "longitude", "name", "address") if valor.get(k) is not None}
+
+
+def _nombres(valor: Any) -> list[str]:
+    """Los nombres de las tarjetas de contacto del despacho."""
+    if not isinstance(valor, list):
+        return []
+    return [
+        str(t["name"])
+        for t in valor
+        if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"].strip()
+    ]
 
 
 @router.post("/vocero/dispatch")
@@ -103,7 +133,7 @@ async def recibir(request: Request) -> Any:
     if not firma_valida(
         body,
         request.headers.get("x-vocero-signature"),
-        ctx.settings.crm_brain_secret,
+        ctx.settings.dispatch_secret,
     ):
         logger.warning("despacho con firma inválida o ausente — 401")
         return JSONResponse({"error": "firma inválida"}, status_code=401)
@@ -260,7 +290,8 @@ async def _procesar(ctx: AppContext, payload: dict[str, Any], *, durable: bool =
             return  # el motivo ya quedó en el log, y la conversación con humano
     else:
         # El CRM ya sabe de quién es esta conversación; el cliente lo recuerda
-        # para no preguntarlo por teléfono, que en esta superficie ni se puede.
+        # para pedir el contexto de ESA conversación y no adivinarla por
+        # teléfono (en `/api/brains` ni se puede).
         registrar = getattr(ctx.crm, "registrar", None)
         if callable(registrar):
             registrar(identity, conversation_id)

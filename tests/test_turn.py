@@ -5,7 +5,7 @@ import asyncio
 import json
 
 from app.llm import LlmExhausted, LlmReply, ToolCall
-from tests.conftest import FakeLLM, mock_crm_basics, wa_body
+from tests.conftest import FakeLLM, mock_crm_basics, despachar
 
 
 async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
@@ -17,7 +17,7 @@ async def test_handoff_despedida_primero_pausa_despues(ctx, client, respx_mock):
         ),
         LlmReply(content="Va — te paso con el equipo ahora mismo, sin que repitas nada."),
     ]
-    await client.post("/webhook", content=wa_body(text="quiero hablar con una persona"))
+    await despachar(client, ctx, text="quiero hablar con una persona")
     await asyncio.sleep(0.25)
 
     assert routes["messages"].call_count == 1
@@ -37,21 +37,19 @@ async def test_llm_agotado_silencio_mas_handoff_error(ctx, client, respx_mock):
     routes = mock_crm_basics(respx_mock)
     ctx.llm.raise_exc = LlmExhausted("proveedor caído")
 
-    resp = await client.post("/webhook", content=wa_body(text="hola"))
-    assert resp.status_code == 200  # el webhook JAMÁS falla por el LLM
+    resp = await despachar(client, ctx, text="hola")
+    assert resp.status_code == 200  # el despacho JAMÁS falla por el LLM
     await asyncio.sleep(0.25)
 
     assert routes["messages"].call_count == 0  # nada roto al lead
     assert routes["handoff"].call_count == 1
     body = json.loads(routes["handoff"].calls[0].request.content)
     assert body["reason"] == "error"
-    # el relay a la bandeja quedó intacto
-    assert len(ctx.store.relays) == 1
 
 
 async def test_turno_programa_seguimiento(ctx, client, respx_mock):
     mock_crm_basics(respx_mock)
-    await client.post("/webhook", content=wa_body(text="hola"))
+    await despachar(client, ctx, text="hola")
     await asyncio.sleep(0.2)
     conv = next(iter(ctx.store.conversations.values()))
     assert conv.greeted is True
@@ -64,7 +62,7 @@ async def test_turno_con_route_out_cierra_sin_seguimiento(ctx, client, respx_moc
         LlmReply(content=None, tool_calls=[ToolCall(id="t1", name="route_out", arguments={})]),
         LlmReply(content="Por ahora no somos el mejor fit — te dejo unos recursos para arrancar por tu cuenta."),
     ]
-    await client.post("/webhook", content=wa_body(text="soy estudiante"))
+    await despachar(client, ctx, text="soy estudiante")
     await asyncio.sleep(0.25)
     assert routes["messages"].call_count == 1
     ficha = json.loads(routes["ficha"].calls[0].request.content)
@@ -90,9 +88,9 @@ async def test_los_turnos_de_una_conversacion_no_se_encinan(ctx, client, respx_m
 
     ctx.llm = LlmLento()
 
-    await client.post("/webhook", content=wa_body(text="Si 10.30", wamid="wamid.a"))
+    await despachar(client, ctx, text="Si 10.30", wamid="wamid.a")
     await asyncio.sleep(0.15)  # el turno A ya arrancó y sigue en el LLM
-    await client.post("/webhook", content=wa_body(text="De mañana", wamid="wamid.b"))
+    await despachar(client, ctx, text="De mañana", wamid="wamid.b")
     await asyncio.sleep(1.2)
 
     assert routes["messages"].call_count == 2  # una respuesta por turno...
@@ -127,7 +125,7 @@ async def test_el_texto_junto_a_una_herramienta_no_se_da_por_dicho(ctx, client, 
         ),
         LlmReply(content="Esta campaña es para agencias de servicios digitales, así que por ahora no encaja. ¡Éxito con tus ventas!"),
     ]
-    await client.post("/webhook", content=wa_body(text="solo vendo propiedades"))
+    await despachar(client, ctx, text="solo vendo propiedades")
     await asyncio.sleep(0.25)
 
     textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
@@ -143,14 +141,14 @@ async def test_no_repite_palabra_por_palabra_un_mensaje_ya_enviado(ctx, client, 
     routes = mock_crm_basics(respx_mock)
     saludo = "¡Hola Guillermo! Soy Nea, de AISHIA. Para ubicarte rápido, ¿qué servicio vendes tú?"
     ctx.llm.replies = [LlmReply(content=saludo)]
-    await client.post("/webhook", content=wa_body(text="hola", wamid="wamid.r1"))
+    await despachar(client, ctx, text="hola", wamid="wamid.r1")
     await asyncio.sleep(0.25)
 
     ctx.llm.replies = [
         LlmReply(content=saludo),
         LlmReply(content="Entendido: solo vendes propiedades. Esta campaña no encaja contigo."),
     ]
-    await client.post("/webhook", content=wa_body(text="solo vendo casas", wamid="wamid.r2"))
+    await despachar(client, ctx, text="solo vendo casas", wamid="wamid.r2")
     await asyncio.sleep(0.25)
 
     textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
@@ -165,7 +163,7 @@ async def test_una_nota_interna_no_le_llega_al_lead(ctx, client, respx_mock):
         LlmReply(content="(Registro actualizado — conversación cerrada con salida digna.)"),
         LlmReply(content="Tienes razón, disculpa la repetición. ¡Éxito con tus ventas!"),
     ]
-    await client.post("/webhook", content=wa_body(text="me repetiste lo mismo"))
+    await despachar(client, ctx, text="me repetiste lo mismo")
     await asyncio.sleep(0.25)
 
     textos = [json.loads(c.request.content)["text"] for c in routes["messages"].calls]
@@ -178,7 +176,7 @@ async def test_si_la_segunda_tambien_sale_mal_silencio_y_handoff(ctx, client, re
         LlmReply(content="(nota interna)"),
         LlmReply(content="[otra nota]"),
     ]
-    await client.post("/webhook", content=wa_body(text="hola"))
+    await despachar(client, ctx, text="hola")
     await asyncio.sleep(0.25)
 
     assert routes["messages"].call_count == 0

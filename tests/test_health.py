@@ -1,8 +1,11 @@
-"""/health: qué Nea es (versión, commit, modo) y cómo va el relay.
+"""/health: qué Nea es (versión, commit, modo) y si Meta le sigue escribiendo.
 
-Lo leerá el CRM para su tarjeta «Quién responde». Dos cosas no se negocian:
-el código HTTP lo decide solo la base (una cola atrasada no debe tumbar el
-HEALTHCHECK del contenedor), y en la respuesta no viaja nada secreto.
+Lo lee el CRM para su tarjeta «Quién responde». Dos cosas no se negocian:
+el código HTTP lo decide solo la base, y en la respuesta no viaja nada secreto.
+
+Desde la 2.0 (spec 031) no hay bloque `relay`: Nea ya no reenvía nada al CRM.
+En su lugar, `webhookDeMeta` dice cuándo llegó el último webhook de Meta, que
+Nea ya no recibe (app/webhook_retirado.py).
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ import pytest
 
 from app.main import create_app
 from app.state import utcnow
-from tests.conftest import CRM_WEBHOOK_URL, make_ctx, make_settings
+from tests.conftest import make_ctx, make_settings
 
 
 @pytest.fixture(autouse=True)
@@ -40,16 +43,16 @@ async def test_por_defecto():
         "db": "ok",
         "version": "dev",
         "mode": "estándar",
-        "relay": {"pendientes": 0, "masViejoSegundos": None, "ultimoErrorEn": None},
+        "webhookDeMeta": {"ultimoEn": None},
     }
 
 
 async def test_el_commit_del_build_viaja_verificado(monkeypatch):
-    monkeypatch.setenv("NEA_VERSION", "1.4.0")
+    monkeypatch.setenv("NEA_VERSION", "2.0.0")
     monkeypatch.setenv("NEA_BUILD_COMMIT", "0123456789abcdef")
     monkeypatch.setenv("SOURCE_COMMIT", "fedcba9876543210")  # el build gana
     _, cuerpo, _ = await _health(make_ctx())
-    assert cuerpo["version"] == "1.4.0"
+    assert cuerpo["version"] == "2.0.0"
     assert cuerpo["commit"] == "0123456"
     assert cuerpo["commitVerified"] is True
 
@@ -62,35 +65,13 @@ async def test_el_commit_del_entorno_viaja_sin_verificar(monkeypatch):
     assert cuerpo["commitVerified"] is False
 
 
-async def test_una_cola_atrasada_no_tumba_el_healthcheck():
+async def test_un_webhook_de_meta_sale_en_health_y_no_lo_tumba():
     ctx = make_ctx()
-    viejo = await ctx.store.enqueue_relay(b"{}", None)
-    await ctx.store.enqueue_relay(b"{}", None)
-    entregado = await ctx.store.enqueue_relay(b"{}", None)
-    await ctx.store.mark_relay_delivered(entregado)
-    ctx.store.relays[viejo].created_at = utcnow() - timedelta(minutes=10)
-    await ctx.store.reschedule_relay(viejo, 1, utcnow() + timedelta(seconds=2))
-
-    status, cuerpo, _ = await _health(ctx)
-
-    assert status == 200
-    relay = cuerpo["relay"]
-    assert relay["pendientes"] == 2
-    assert 600 <= relay["masViejoSegundos"] < 700
-    error = datetime.fromisoformat(relay["ultimoErrorEn"])
-    assert utcnow() - error < timedelta(minutes=1)
-
-
-async def test_si_la_cola_no_se_puede_leer_sigue_en_200(monkeypatch):
-    ctx = make_ctx()
-
-    async def revienta():
-        raise RuntimeError("relation relay_queue does not exist")
-
-    monkeypatch.setattr(ctx.store, "relay_stats", revienta)
+    ctx.webhook_meta_ultimo = utcnow() - timedelta(seconds=30)
     status, cuerpo, _ = await _health(ctx)
     assert status == 200
-    assert cuerpo["relay"] is None
+    visto = datetime.fromisoformat(cuerpo["webhookDeMeta"]["ultimoEn"])
+    assert utcnow() - visto < timedelta(minutes=1)
 
 
 @pytest.mark.parametrize(
@@ -100,8 +81,7 @@ async def test_si_la_cola_no_se_puede_leer_sigue_en_200(monkeypatch):
         ({"vocero_mode": "cloud", "crm_organization": ""}, "multiorg"),
     ],
 )
-async def test_en_cloud_dice_su_modo_y_no_hay_relay(ajustes, modo):
-    """En cloud el relay no corre: el CRM ya tiene el mensaje."""
+async def test_en_cloud_dice_su_modo(ajustes, modo):
     _, cuerpo, _ = await _health(make_ctx(make_settings(**ajustes)))
     assert cuerpo["mode"] == modo
     assert "relay" not in cuerpo
@@ -122,15 +102,6 @@ async def test_sin_base_es_503_pero_dice_quien_es(monkeypatch):
 
 async def test_no_viaja_nada_secreto():
     ctx = make_ctx()
-    await ctx.store.reschedule_relay(
-        await ctx.store.enqueue_relay(b"{}", "sha256=firma"), 1, utcnow()
-    )
     _, _, texto = await _health(ctx)
-    for secreto in (
-        CRM_WEBHOOK_URL,
-        "tok-crm",  # el token va en la ruta del webhook del CRM
-        ctx.settings.crm_bot_api_key,
-        ctx.settings.llm_api_key,
-        "sha256=firma",
-    ):
+    for secreto in (ctx.settings.crm_bot_api_key, ctx.settings.llm_api_key):
         assert secreto not in texto

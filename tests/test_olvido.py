@@ -33,7 +33,7 @@ from tests.conftest import (
     make_ctx,
     make_settings,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 
 SECRETO_GEMELO = "secreto-gemelo-del-olvido"
@@ -275,7 +275,7 @@ def _historial(llamada: dict) -> str:
 
 async def test_una_conversacion_nueva_del_crm_no_hereda_la_memoria(ctx, client, respx_mock):
     rutas = mock_crm_basics(respx_mock, conv_id="cv_primera")
-    await client.post("/webhook", content=wa_body(text="vendo seguros de auto", wamid="wamid.a"))
+    await despachar(client, ctx, text="vendo seguros de auto", wamid="wamid.a")
     await asyncio.sleep(0.25)
     primera = next(iter(ctx.store.conversations.values()))
     assert primera.crm_conversation_id == "cv_primera" and primera.greeted
@@ -285,7 +285,7 @@ async def test_una_conversacion_nueva_del_crm_no_hereda_la_memoria(ctx, client, 
     rutas["context"].mock(
         return_value=httpx.Response(200, json=crm_context(conv_id="cv_segunda"))
     )
-    await client.post("/webhook", content=wa_body(text="hola", wamid="wamid.b"))
+    await despachar(client, ctx, text="hola", wamid="wamid.b")
     await asyncio.sleep(0.25)
 
     assert len(ctx.llm.calls) == 2
@@ -299,9 +299,9 @@ async def test_una_conversacion_nueva_del_crm_no_hereda_la_memoria(ctx, client, 
 async def test_la_misma_conversacion_conserva_su_memoria(ctx, client, respx_mock):
     # La red no puede dispararse en el caso de todos los días.
     mock_crm_basics(respx_mock)
-    await client.post("/webhook", content=wa_body(text="vendo seguros de auto", wamid="wamid.a"))
+    await despachar(client, ctx, text="vendo seguros de auto", wamid="wamid.a")
     await asyncio.sleep(0.25)
-    await client.post("/webhook", content=wa_body(text="¿y cuánto cuesta?", wamid="wamid.b"))
+    await despachar(client, ctx, text="¿y cuánto cuesta?", wamid="wamid.b")
     await asyncio.sleep(0.25)
     assert len(ctx.llm.calls) == 2
     assert "seguros de auto" in _historial(ctx.llm.calls[1])

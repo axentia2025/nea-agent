@@ -92,29 +92,6 @@ class OfferedSlot:
 
 
 @dataclass
-class RelayItem:
-    id: int
-    body: bytes
-    signature: str | None
-    attempts: int
-    created_at: datetime
-    next_retry_at: datetime
-    delivered_at: datetime | None = None
-    abandoned_at: datetime | None = None
-    # La última entrega fallida de esta fila (007). La lee /health.
-    last_error_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class RelayStats:
-    """Cómo va la cola del relay, para /health (solo modo de siempre)."""
-
-    pendientes: int  # ni entregados ni abandonados
-    mas_viejo_segundos: int | None  # edad del pendiente más viejo
-    ultimo_error_en: datetime | None  # la entrega fallida más reciente
-
-
-@dataclass
 class PendingSend:
     """Respuesta generada cuyo envío al CRM agotó los reintentos del turno.
     Se persiste para reintento diferido — jamás se descarta (incidente 2026-08-03)."""
@@ -140,7 +117,7 @@ class PendingSend:
 
 @dataclass
 class InboundMessage:
-    """Mensaje entrante ya parseado del webhook de Meta."""
+    """Un mensaje del cliente, como lo trae el despacho del CRM."""
 
     wa_message_id: str | None
     identity: str
@@ -156,6 +133,9 @@ class InboundMessage:
     media_voice: bool = False
     location: dict[str, Any] | None = None
     contact_names: list[str] = field(default_factory=list)
+    # 031 — Por dónde escribe: whatsapp, instagram, messenger, tiktok… Lo
+    # dice el despacho (`conversation.channel`); None si no lo dijo.
+    channel: str | None = None
 
 
 # --------------------------------------------------------------- contrato ---
@@ -175,15 +155,6 @@ class Store(Protocol):
     async def already_processed(self, marcas: list[str]) -> set[str]:
         """Cuáles de estas marcas ya existen. Solo consulta: no marca nada."""
         ...
-
-    # cola de relay
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int: ...
-    async def due_relays(self, now: datetime) -> list[RelayItem]: ...
-    async def mark_relay_delivered(self, relay_id: int) -> None: ...
-    async def mark_relay_abandoned(self, relay_id: int) -> None: ...
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None: ...
 
     # conversaciones
     async def get_or_create_conversation(
@@ -251,14 +222,6 @@ class Store(Protocol):
         """Marca followup_sent=True atómicamente. True si ESTA llamada lo ganó."""
         ...
 
-    async def relay_stats(self) -> RelayStats: ...
-    # ¿Sigue en la cola, sin entregar, el payload que trae alguno de estos
-    # wamids? Es lo que separa «el CRM no conoce a este lead» de «el CRM
-    # todavía no recibe su mensaje» cuando `/api/bot/context` da 404.
-    async def relay_pendiente_con(self, marcas: list[str]) -> bool: ...
-    # Lo pendiente vuelve a tocar YA (el CRM contestó: ya no hay por qué
-    # esperar el backoff). Devuelve cuántas filas adelantó.
-    async def adelantar_relays(self, now: datetime) -> int: ...
     async def ping(self) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -272,7 +235,6 @@ class MemoryStore(MemoryDispatchStore):
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self.processed: set[str] = set()
-        self.relays: dict[int, RelayItem] = {}
         self.conversations: dict[int, Conversation] = {}
         self._conv_by_identity: dict[tuple[str, str], int] = {}
         self.messages: list[BotMessage] = []
@@ -287,70 +249,6 @@ class MemoryStore(MemoryDispatchStore):
 
     async def already_processed(self, marcas: list[str]) -> set[str]:
         return {m for m in marcas if m in self.processed}
-
-    async def enqueue_relay(self, body: bytes, signature: str | None) -> int:
-        rid = next(self._ids)
-        now = utcnow()
-        self.relays[rid] = RelayItem(
-            id=rid, body=body, signature=signature, attempts=0,
-            created_at=now, next_retry_at=now,
-        )
-        return rid
-
-    async def due_relays(self, now: datetime) -> list[RelayItem]:
-        return [
-            r for r in sorted(self.relays.values(), key=lambda r: r.id)
-            if r.delivered_at is None and r.abandoned_at is None
-            and r.next_retry_at <= now
-        ]
-
-    async def mark_relay_delivered(self, relay_id: int) -> None:
-        self.relays[relay_id].delivered_at = utcnow()
-
-    async def mark_relay_abandoned(self, relay_id: int) -> None:
-        self.relays[relay_id].abandoned_at = utcnow()
-
-    async def reschedule_relay(
-        self, relay_id: int, attempts: int, next_retry_at: datetime
-    ) -> None:
-        item = self.relays[relay_id]
-        item.attempts = attempts
-        item.next_retry_at = next_retry_at
-        item.last_error_at = utcnow()
-
-    async def relay_pendiente_con(self, marcas: list[str]) -> bool:
-        claves = [m.encode() for m in marcas if m]
-        return any(
-            clave in r.body
-            for r in self.relays.values()
-            if r.delivered_at is None and r.abandoned_at is None
-            for clave in claves
-        )
-
-    async def adelantar_relays(self, now: datetime) -> int:
-        n = 0
-        for r in self.relays.values():
-            if r.delivered_at is None and r.abandoned_at is None and r.next_retry_at > now:
-                r.next_retry_at = now
-                n += 1
-        return n
-
-    async def relay_stats(self) -> RelayStats:
-        pendientes = [
-            r for r in self.relays.values()
-            if r.delivered_at is None and r.abandoned_at is None
-        ]
-        errores = [r.last_error_at for r in self.relays.values() if r.last_error_at]
-        mas_viejo = min((r.created_at for r in pendientes), default=None)
-        return RelayStats(
-            pendientes=len(pendientes),
-            mas_viejo_segundos=(
-                max(0, int((utcnow() - mas_viejo).total_seconds()))
-                if mas_viejo is not None
-                else None
-            ),
-            ultimo_error_en=max(errores, default=None),
-        )
 
     async def get_or_create_conversation(
         self,
@@ -537,9 +435,10 @@ class AppContext:
     # (organization_id, slug) del turno en curso. La pone el despacho al armar
     # el contexto del turno; None fuera del modo multi-organización.
     organizacion: tuple[str, str] | None = None
-    coalescer: Any | None = None
-    relay_wake: asyncio.Event = field(default_factory=asyncio.Event)
     dispatch_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # 031 — Cuándo llegó el último webhook de Meta a Nea, que desde la 2.0 ya
+    # no lo recibe (app/webhook_retirado.py). Lo enseña /health.
+    webhook_meta_ultimo: datetime | None = None
     # ¿El CRM de esta instancia tiene motor de agenda? Vocero lo trae detrás de
     # una bandera de despliegue y viene apagado por defecto. Es lo que vale en
     # el turno en curso: el turno lo refresca al empezar desde `agenda_sonda`
@@ -557,8 +456,3 @@ class AppContext:
     turn_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     # Cuántos turnos tienen tomado (o esperan) el candado de esa identidad.
     turn_lock_users: dict[str, int] = field(default_factory=dict)
-    # Ráfagas que no alcanzaron al CRM y esperan su reintento (app/turn.py),
-    # por (organización, identidad): a lo más UNA por conversación, y el
-    # mensaje nuevo que llega mientras tanto se la lleva consigo. Se comparte
-    # con los contextos por organización (`replace` copia la referencia).
-    turnos_pendientes: dict[tuple[str, str], Any] = field(default_factory=dict)

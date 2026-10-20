@@ -28,7 +28,7 @@ from tests.conftest import (
     crm_context,
     make_ctx,
     mock_crm_basics,
-    wa_body,
+    despachar,
 )
 from tests.test_followup import preparar_conversacion
 
@@ -148,7 +148,7 @@ async def test_el_turno_arma_el_prompt_con_la_zona_del_negocio(ctx, client, resp
     routes["context"].mock(
         return_value=httpx.Response(200, json=_contexto_de("America/Bogota"))
     )
-    await client.post("/webhook", content=wa_body(text="¿tienes en la mañana?"))
+    await despachar(client, ctx, text="¿tienes en la mañana?")
     await asyncio.sleep(0.25)
 
     system = ctx.llm.calls[0]["messages"][0]["content"]
@@ -158,7 +158,7 @@ async def test_el_turno_arma_el_prompt_con_la_zona_del_negocio(ctx, client, resp
 
 async def test_sin_zona_del_crm_el_turno_usa_la_de_la_instancia(ctx, client, respx_mock):
     mock_crm_basics(respx_mock)  # su bloque `booking` no trae zona
-    await client.post("/webhook", content=wa_body(text="hola"))
+    await despachar(client, ctx, text="hola")
     await asyncio.sleep(0.25)
 
     system = ctx.llm.calls[0]["messages"][0]["content"]

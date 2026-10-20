@@ -1,9 +1,12 @@
 # Nea — Guía para Claude
 
-Microservicio FastAPI del agente de agendamiento para WhatsApp. Recibe el
-webhook de WhatsApp (Meta Cloud API), lo releva al CRM
-([vocero-crm](https://github.com/kevinrivm/vocero-crm)) y conversa vía OpenAI
-— **enviando siempre a través del API del CRM**, nunca directo a Meta.
+Microservicio FastAPI del agente de agendamiento. El CRM
+([vocero-crm](https://github.com/kevinrivm/vocero-crm)) recibe los mensajes de
+WhatsApp, Instagram, Messenger y TikTok y se los **despacha** a Nea firmados
+(`POST /vocero/dispatch`); Nea conversa vía el modelo y contesta **siempre a
+través del API del CRM**, nunca directo a Meta ni a Zernio. Desde la 2.0 (spec
+031 de vocero-crm) el despacho es la única entrada: Nea ya no recibe el webhook
+de Meta ni lo reenvía.
 
 ## Stack
 
@@ -18,14 +21,16 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | El chasis conductual del agente | `app/prompt.py` (NO relajar los NUNCA) |
 | La capa de persona del negocio | `app/profile.py` (CRM → brief local → mínimo) |
 | Las acciones del bot | `app/tools.py` + orquestación en `app/turn.py` |
-| El contrato con el CRM | `app/crm.py` (espejo del bot gateway de vocero) |
-| Vocero multitenant (modo cloud) | `app/dispatch.py` (entrada) · `app/crm_brains.py` (salida) |
+| El contrato con el CRM | `app/crm.py` (espejo del bot gateway de vocero) · prueba gemela del despacho en `tests/test_despacho_raiz.py` |
+| La entrada (despacho del CRM, los dos modos) | `app/dispatch.py` · cola durable `app/dispatch_store.py` + `app/dispatch_worker.py` |
+| Vocero multitenant (modo cloud) | `app/crm_brains.py` (salida por `/api/brains/*`) |
 | Atender a VARIOS negocios a la vez | `app/multiorg.py` |
-| Webhook/firma/dedup/relay | `app/webhook.py` · `app/relay.py` |
-| Coalesce y seguimiento | `app/coalesce.py` · `app/followup.py` |
+| El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
+| Seguimiento | `app/followup.py` |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
 | El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
-| `/health` (versión, commit, modo, relay) | `app/main.py` · `app/version.py` |
+| `/health` (versión, commit, modo, webhook de Meta) | `app/main.py` · `app/version.py` |
+| Tablas en un esquema propio (`DATABASE_SCHEMA`) | `app/db.py` (`PgStore.connect`) |
 | Tablas | `migrations/*.sql` (idempotentes, aplican al boot) |
 
 ## Reglas duras
@@ -56,21 +61,18 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 - **La credencial derivada es un contrato con el otro repositorio.** La cadena
   `vocero:cerebro:v1` y el base64url sin relleno están fijados en pruebas a
   ambos lados; desviarse un byte da 401 mudo en todo.
-- **En cloud se deduplica por despacho Y por mensaje.** El `dispatchId` cubre
+- **Se deduplica por despacho Y por mensaje** (raíz y cloud). El `dispatchId` cubre
   los reintentos del mismo despacho; `messages[].id` cubre el mensaje que el
   CRM repite en un despacho distinto (la ráfaga completa viaja cada vez). El
   id se anota cuando el mensaje ENTRA al historial (`_anotar_leidos`), no al
   recibir el despacho: un turno que un gate calló no leyó nada, y si esos
   mensajes vuelven hay que leerlos.
-- **Degradación silenciosa**: LLM/CRM fallando jamás rompe el webhook ni manda
+- **Degradación silenciosa**: LLM/CRM fallando jamás rompe el despacho ni manda
   texto roto; tras reintentos → silencio + handoff `error`.
-- **Un turno sin CRM se reintenta, y solo ese.** Si el gate 2 no alcanza al
-  CRM (red, 5xx, o un 404 con el mensaje todavía en el relay), `TurnoSinCrm`
-  reprograma la MISMA ráfaga (`TURN_RETRY_DELAYS`): una por conversación, y
-  lo que el lead escriba mientras tanto se fusiona en ella. Agotadas las
-  esperas, handoff `error` en cuanto el CRM conteste. Nada posterior a leer el
-  contexto se reintenta así: repetir un turno que ya pensó o escribió es
-  contestarle dos veces al lead.
+- **Un turno sin CRM no se reintenta aquí.** Si el gate 2 no alcanza al CRM,
+  `TurnoSinCrm` sube a la cola del despacho, que le pasa la conversación a una
+  persona (handoff `error`) en cuanto el CRM conteste. Nunca se repite un
+  turno que ya pensó o escribió: sería contestarle dos veces al lead.
 - **Todo lo que sale a WhatsApp pasa por `app/formato.py`** (turno y
   seguimiento), y el historial guarda lo convertido: WhatsApp no pinta
   Markdown, y si el modelo se ve escribiéndolo lo sigue escribiendo. Las URL y
@@ -80,13 +82,16 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   mensaje con contenido reabre en el acto, la fase vuelve a descubrimiento y
   los contadores cuentan desde `stall_since_message_id`. El cierre se anota en
   la ficha del CRM (`cierre_sin_rumbo`) y se borra al reabrir.
-- **La identidad va en la forma del CRM**: el teléfono canónico o
-  `bsuid:<id>` (`identidad_del_mensaje`, espejo de `resolveIdentity` del CRM).
-  Con el BSUID pelón, `/api/bot/context` da 404 y el lead nunca recibe
-  respuesta.
-- **`/health` da 200 mientras la base conteste.** La cola del relay es
-  información para el CRM, no motivo para que Docker reinicie el contenedor. Y
-  no lleva secretos ni URLs: el webhook del CRM trae su token en la ruta.
+- **La identidad va en la forma del CRM**, tal como llega en el despacho
+  (`contact.identity`): el teléfono canónico, `bsuid:<id>`, `ig:<id>`,
+  `fb:<id>` o `tt:<id>`. No se reescribe: con otra forma, `/api/bot/context`
+  da 404 y el lead nunca recibe respuesta.
+- **`/health` da 200 mientras la base conteste.** `webhookDeMeta` es
+  información para quien instala, no motivo para que Docker reinicie el
+  contenedor. Y no lleva secretos ni URLs.
+- **El webhook de Meta contesta 503, no 404** (`app/webhook_retirado.py`): una
+  instalación que actualiza sin devolverle el webhook al CRM no pierde
+  mensajes, porque Meta reintenta.
 - **La agenda la manda el CRM.** Vocero registra la oferta contra la
   conversación (por eso `conversationId` va SIEMPRE en `get_availability`) y
   decide qué es reservable. `offered_slots` de Nea es un ESPEJO: sirve para
