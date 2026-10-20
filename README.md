@@ -240,9 +240,9 @@ dale a tu servidor credenciales del registro, o Coolify no podrá descargarlo.
 | `DATABASE_SCHEMA` | `nea` si comparte la base del CRM | Usa `public`: con la base del CRM, sus tablas quedarían mezcladas |
 | `CRM_BASE_URL` | `https://crm.tu-negocio.com` (o la dirección interna), sin `/` al final | Apunta a `http://localhost:3000` |
 | `CRM_BOT_API_KEY` | El `BOT_API_KEY` del CRM | Todo despacho da 401 y el CRM le pasa cada conversación a una persona |
-| `LLM_API_KEY` | La llave del proveedor del modelo | Nea no arranca |
+| `LLM_API_KEY` | Opcional. Vacía, Nea piensa por el CRM: la llave y el modelo se eligen en Ajustes → IA y Nea llama a `/api/bot/llm` con `CRM_BOT_API_KEY`. Con valor, cerebro propio con su proveedor | Piensa por el CRM; sin IA en el CRM, cada conversación pasa a una persona |
 | `LLM_BASE_URL` | Con OpenRouter, `https://openrouter.ai/api/v1` | OpenAI |
-| `LLM_MODEL` | Un modelo rápido que use herramientas. En OpenRouter lleva prefijo: `z-ai/glm-5.3-flash` | `gpt-4o-mini` |
+| `LLM_MODEL` | Un modelo rápido que use herramientas. En OpenRouter lleva prefijo: `z-ai/glm-5.3-flash`. Pensando por el CRM manda el modelo de Ajustes → IA; este es el respaldo | `gpt-4o-mini` |
 | `LLM_TRANSCRIBE_MODEL` | El que oye las notas de voz. Fuera de OpenAI, uno que acepte audio: `google/gemini-2.5-flash` | `whisper-1`, que solo existe en OpenAI: con otro proveedor falla toda nota de voz |
 | `ALLOWED_WA_IDS` | Mientras pruebas, tu número (`5215512345678`) o tu identidad de Instagram (`ig:…`) | Nea le contesta a todos |
 
@@ -288,7 +288,7 @@ secretos ni URLs.
 
 ```json
 {"status": "ok", "db": "ok", "version": "2.0.0", "commit": "a1b2c3d",
- "commitVerified": true, "mode": "estándar",
+ "commitVerified": true, "mode": "estándar", "llm": "crm",
  "webhookDeMeta": {"ultimoEn": null}}
 ```
 
@@ -300,6 +300,7 @@ secretos ni URLs.
 | `commit` | Los primeros 7 caracteres del commit. Solo aparece si se conoce |
 | `commitVerified` | `true` si el commit salió del build; `false` si es el `SOURCE_COMMIT` que la plataforma puso en el entorno al arrancar, que puede estar desfasado |
 | `mode` | `estándar`, `cloud` o `multiorg`, con acento |
+| `llm` | `crm` si piensa por el CRM (`LLM_API_KEY` vacía, o multi-organización); `propia` si usa su `LLM_API_KEY`. Nunca la llave ni la URL |
 | `webhookDeMeta.ultimoEn` | La última vez que Meta le mandó un webhook a Nea (ISO 8601, UTC), o `null`. Desde la 2.0 no debería pasar: si tiene fecha, el webhook todavía apunta a Nea y hay que devolvérselo al CRM (ver «Si vienes de Nea 1.x») |
 
 Vocero raíz lee este `/health` para su tarjeta «Quién responde a tus clientes»

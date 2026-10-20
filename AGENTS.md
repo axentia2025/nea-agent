@@ -23,13 +23,14 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
 | Las acciones del bot | `app/tools.py` + orquestación en `app/turn.py` |
 | El contrato con el CRM | `app/crm.py` (espejo del bot gateway de vocero) · prueba gemela del despacho en `tests/test_despacho_raiz.py` |
 | La entrada (despacho del CRM, los dos modos) | `app/dispatch.py` · cola durable `app/dispatch_store.py` + `app/dispatch_worker.py` |
+| Con qué piensa (llave propia o la del CRM por `/api/bot/llm`) | `app/llm.py` (`LlmPorElCrm`) · elección al arranque en `app/main.py` (`_llm_del_arranque`) |
 | Vocero multitenant (modo cloud) | `app/crm_brains.py` (salida por `/api/brains/*`) |
 | Atender a VARIOS negocios a la vez | `app/multiorg.py` |
 | El webhook de Meta que ya no se recibe (503) | `app/webhook_retirado.py` |
 | Seguimiento | `app/followup.py` |
 | Lo que el lead ve en WhatsApp (Markdown → WhatsApp) | `app/formato.py` |
 | El candado de cierre (conversación sin rumbo) | `app/stall.py` + gate 1.5 de `app/turn.py` |
-| `/health` (versión, commit, modo, webhook de Meta) | `app/main.py` · `app/version.py` |
+| `/health` (versión, commit, modo, `llm`, webhook de Meta) | `app/main.py` · `app/version.py` |
 | Tablas en un esquema propio (`DATABASE_SCHEMA`) | `app/db.py` (`PgStore.connect`) |
 | Tablas | `migrations/*.sql` (idempotentes, aplican al boot) |
 
@@ -58,6 +59,12 @@ idempotentes al arranque · httpx (CRM y OpenAI) · pytest + respx · Docker
   3. **`ctx.crm` y `ctx.llm` se arman por turno.** El del arranque es un
      centinela que revienta al usarse: un camino que se olvide de armarlos
      tiene que fallar, no escribirle al negocio equivocado.
+- **Junto a Vocero raíz, `LLM_API_KEY` es opcional** (vocero-crm 036). Vacía,
+  Nea piensa por el CRM: `OpenAiLlm` apunta a `{CRM_BASE_URL}/api/bot/llm`
+  con `CRM_BOT_API_KEY` y el modelo del perfil (`llm.model`; `LLM_MODEL` si
+  no trae). El modelo se relee con el perfil (TTL), sin reiniciar. Un 402
+  `sin_credencial` del CRM es un fallo del proveedor más: silencio + handoff
+  `error`. No aplica en cloud: allá manda `app/multiorg.py`.
 - **La credencial derivada es un contrato con el otro repositorio.** La cadena
   `vocero:cerebro:v1` y el base64url sin relleno están fijados en pruebas a
   ambos lados; desviarse un byte da 401 mudo en todo.

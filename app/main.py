@@ -26,7 +26,7 @@ from app.dispatch import router as dispatch_router
 from app.dispatch_worker import run as run_dispatch_worker
 from app.db import PgStore
 from app.followup import FollowupWorker
-from app.llm import OpenAiLlm
+from app.llm import LlmPorElCrm, OpenAiLlm
 from app.multiorg import (
     CrmSinOrganizacion,
     LlmSinOrganizacion,
@@ -96,7 +96,47 @@ def _identidad(settings: Settings | None) -> dict[str, Any]:
             if settings.multi_org
             else "cloud" if settings.cloud_mode else "estándar"
         )
+        # 036 — Con qué llave piensa: la del CRM (Ajustes → IA, por su proxy)
+        # o una propia en LLM_API_KEY. Solo la palabra: ni la llave ni la URL.
+        cuerpo["llm"] = (
+            "crm" if settings.multi_org or settings.piensa_por_el_crm else "propia"
+        )
     return cuerpo
+
+
+def _llm_del_arranque(settings: Settings, perfil: ProfileProvider | None) -> Any:
+    """El cliente del modelo del contexto del arranque.
+
+    - Multi-organización: un centinela. No hay modelo por defecto —Nea no
+      lleva la llave de nadie— y uno de verdad aquí le cobraría al dueño de la
+      plataforma el consumo de sus miembros si algún camino se olvidara de
+      cambiarlo. Cada turno arma el suyo (app/multiorg.py).
+    - Contra la raíz sin `LLM_API_KEY` (036): piensa por el CRM, con
+      `CRM_BOT_API_KEY` y el modelo que diga el perfil.
+    - Con `LLM_API_KEY`: su proveedor, como siempre.
+    """
+    if settings.multi_org:
+        return LlmSinOrganizacion()
+    if settings.piensa_por_el_crm:
+        return LlmPorElCrm(
+            settings.crm_base_url,
+            settings.crm_bot_api_key,
+            perfil,
+            model=settings.llm_model,
+            transcribe_model=settings.llm_transcribe_model,
+            reasoning_effort=settings.llm_reasoning_effort,
+            provider_sort=settings.llm_provider_sort,
+            timeout=settings.llm_timeout_seconds,
+        )
+    return OpenAiLlm(
+        settings.llm_api_key,
+        settings.llm_model,
+        transcribe_model=settings.llm_transcribe_model,
+        base_url=settings.llm_base_url or None,
+        reasoning_effort=settings.llm_reasoning_effort,
+        provider_sort=settings.llm_provider_sort,
+        timeout=settings.llm_timeout_seconds,
+    )
 
 
 # Variables de Nea 1.x que la 2.0 ya no lee. Una variable que deja de leerse
@@ -160,50 +200,41 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 )
             else:
                 crm = CrmClient(settings.crm_base_url, settings.crm_bot_api_key)
+            # En multi-organización el perfil es de cada negocio y lo sirve el
+            # registro; un proveedor global aquí serviría el perfil de uno a
+            # todos.
+            perfil = (
+                None
+                if settings.multi_org
+                else ProfileProvider(
+                    crm,
+                    default_name=settings.agent_name,
+                    brief_path=settings.brief_path or None,
+                )
+            )
             app.state.ctx = AppContext(
                 settings=settings,
                 store=store,
                 crm=crm,
-                # Mismo criterio que el CRM de arriba: en multi-organización
-                # no hay modelo por defecto. Además de que no habría con qué
-                # construirlo —Nea no lleva la llave de nadie—, uno de verdad
-                # aquí le cobraría al dueño de la plataforma el consumo de sus
-                # miembros si algún camino se olvidara de cambiarlo.
-                llm=(
-                    LlmSinOrganizacion()
-                    if settings.multi_org
-                    else OpenAiLlm(
-                        settings.llm_api_key,
-                        settings.llm_model,
-                        transcribe_model=settings.llm_transcribe_model,
-                        base_url=settings.llm_base_url or None,
-                        reasoning_effort=settings.llm_reasoning_effort,
-                        provider_sort=settings.llm_provider_sort,
-                        timeout=settings.llm_timeout_seconds,
-                    )
-                ),
-                # En multi-organización el perfil es de cada negocio y lo
-                # sirve el registro; un proveedor global aquí serviría el
-                # perfil de uno a todos.
-                profile=(
-                    None
-                    if settings.multi_org
-                    else ProfileProvider(
-                        crm,
-                        default_name=settings.agent_name,
-                        brief_path=settings.brief_path or None,
-                    )
-                ),
+                # Mismo criterio que el CRM de arriba (ver `_llm_del_arranque`).
+                llm=_llm_del_arranque(settings, perfil),
+                profile=perfil,
                 registro=registro,
             )
         c: AppContext = app.state.ctx
 
         if c.settings.audio_mal_configurado:
             logger.warning(
-                "OPENAI_BASE_URL apunta a otro proveedor pero "
-                "OPENAI_TRANSCRIBE_MODEL sigue en 'whisper-1', que solo existe "
-                "en OpenAI: las notas de voz van a fallar. Pon ahí un modelo "
-                "que acepte audio (no todos oyen — los GLM, por ejemplo, no)."
+                "el modelo se llama por un proveedor compatible (LLM_BASE_URL "
+                "o el CRM) pero LLM_TRANSCRIBE_MODEL sigue en 'whisper-1', que "
+                "solo existe en OpenAI: las notas de voz van a fallar. Pon ahí "
+                "un modelo que acepte audio (no todos oyen — los GLM, por "
+                "ejemplo, no)."
+            )
+        if c.settings.piensa_por_el_crm:
+            logger.info(
+                "LLM_API_KEY vacía: Nea piensa por el CRM (Ajustes → IA, "
+                "/api/bot/llm) con el modelo que diga su perfil"
             )
 
         if own_resources:

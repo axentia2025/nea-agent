@@ -239,7 +239,25 @@ class Settings(BaseSettings):
         que TODA nota de voz falle. Se detecta al arrancar y se avisa una vez,
         en vez de dejar que se descubra con un cliente esperando respuesta.
         """
-        return bool(self.llm_base_url) and self.llm_transcribe_model == "whisper-1"
+        # Pensando por el CRM también hay proveedor propio: el proxy reenvía el
+        # chat, y el audio viaja dentro del chat (app/llm.py).
+        por_chat = bool(self.llm_base_url) or self.piensa_por_el_crm
+        return por_chat and self.llm_transcribe_model == "whisper-1"
+
+    @property
+    def piensa_por_el_crm(self) -> bool:
+        """¿El modelo se llama a través del CRM y no con una llave propia?
+
+        Spec 036 (D6) de vocero-crm: junto a Vocero raíz, la llave del modelo
+        vive en Ajustes → IA del CRM y `/api/bot/llm` la pone al reenviar. Nea
+        entra con `CRM_BOT_API_KEY`, la misma que ya escribe en la bandeja.
+
+        Solo contra la raíz y solo con `LLM_API_KEY` vacía. Con llave, Nea
+        sigue con su proveedor (cerebro propio), como siempre. En cloud no
+        aplica: allá un negocio usa su llave y varios piensan por
+        `/api/brains/llm` (app/multiorg.py), que es otro contrato.
+        """
+        return not self.cloud_mode and not self.llm_api_key.strip()
 
     @property
     def multi_org(self) -> bool:
