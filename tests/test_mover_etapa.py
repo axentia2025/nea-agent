@@ -136,3 +136,28 @@ async def test_en_la_ultima_etapa_tampoco(respx_mock):
     await _turno(ctx)
     assert "move_stage" not in _nombres(ctx.llm.calls[0]["tools"])
     await ctx.crm.aclose()
+
+
+def test_dice_cuando_mover_no_solo_que_se_puede():
+    """Con «hazlo cuando la conversación lo amerite» y nada más, GLM y
+    gpt-4o-mini nunca llamaron move_stage en la prueba en vivo (2026-10-21),
+    ni con «me interesa contratarlos». El prompt y la herramienta tienen que
+    dar criterios concretos, pedir que vaya en el mismo turno y decir cuándo NO.
+    """
+    from app.prompt import build_system_prompt
+    from app.state import Conversation
+    from app.tools import MOVE_STAGE_SCHEMA
+
+    contexto = crm_context()
+    contexto["lead"]["nextStages"] = SIGUIENTES
+    prompt = build_system_prompt(
+        profile=BusinessProfile(agent_name="Sofi"),
+        context=contexto,
+        conv=Conversation(id=1, wa_identity="5215550000000"),
+    )
+    linea = next(l for l in prompt.splitlines() if "move_stage a:" in l)
+    for criterio in ("MISMO TURNO", "precio", "contratar", "agendar", "saludo"):
+        assert criterio in linea, criterio
+    descripcion = MOVE_STAGE_SCHEMA["function"]["description"]
+    for criterio in ("MISMO", "precio", "contratar", "saludo"):
+        assert criterio in descripcion, criterio

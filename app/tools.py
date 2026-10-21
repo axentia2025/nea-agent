@@ -206,9 +206,13 @@ MOVE_STAGE_SCHEMA: dict[str, Any] = {
     "function": {
         "name": "move_stage",
         "description": (
-            "Avanza al lead en el pipeline del negocio cuando la conversación lo "
-            "amerita (por ejemplo, ya dijo qué busca y para cuándo). Solo a una "
-            "de las etapas que el contexto dice que puedes usar. Es interno: no "
+            "Avanza al lead en el pipeline del negocio. Llámala en el MISMO "
+            "turno en que contestas (junto con tus otras herramientas) en "
+            "cuanto el lead dijo qué necesita o para qué lo quiere, o pidió "
+            "avanzar: precio, contratar, empezar, agendar o una cita. No la "
+            "llames por un saludo, un «ok» ni una duda suelta sin intención. "
+            "Solo a una de las etapas que el contexto dice que puedes usar: la "
+            "que por su nombre mejor describa dónde va el lead. Es interno: no "
             "se lo anuncies al lead."
         ),
         "parameters": {

@@ -470,13 +470,23 @@ def build_system_prompt(
     if lead.get("stageName"):
         lines.append(f"- Etapa en el pipeline: {lead['stageName']}.")
     # 038 — Con la herramienta encendida y a dónde ir, se le dice a qué
-    # etapas puede moverlo. Es interno: el lead no sabe del pipeline.
+    # etapas puede moverlo y CUÁNDO. Es interno: el lead no sabe del pipeline.
+    # Con solo «cuando la conversación lo amerite», GLM y gpt-4o-mini jamás la
+    # llamaron (prueba en vivo del 2026-10-21): ni con «me interesa
+    # contratarlos» ni con «lo quiero para mi consultorio, ¿qué sigue?». Hacen
+    # falta criterios concretos y que vaya en el mismo turno de la respuesta.
     siguientes = etapas_siguientes(context)
     if siguientes and profile.permite("etapa"):
         lines.append(
             "- Puedes avanzar al lead en el pipeline con move_stage a: "
             + ", ".join(siguientes)
-            + ". Hazlo cuando la conversación lo amerite, sin anunciárselo."
+            + " (en ese orden). Llama move_stage EN ESTE MISMO TURNO, junto con "
+            "tu respuesta y tus otras herramientas, en cuanto el lead ya dijo "
+            "qué necesita o para qué lo quiere, o pidió avanzar (precio, "
+            "contratar, empezar, agendar, una cita). Elige la etapa que por su "
+            "nombre mejor describa dónde va; si dudas, la primera. NO lo muevas "
+            "por un saludo, un «ok» o una duda suelta sin intención, ni a una "
+            "etapa que ya pasó. Es interno: jamás se lo anuncies."
         )
     ficha = contact.get("ficha") or {}
     filled = {k: v for k, v in ficha.items() if v not in (None, "", [])}
