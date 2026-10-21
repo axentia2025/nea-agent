@@ -4,6 +4,16 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar (será 2.0.1)
+
+### Arreglado
+
+- **`ALLOWED_WA_IDS` y `TESTER_WA_IDS` aceptan el teléfono como se escriba**:
+  con `+`, espacios, guiones o paréntesis. Antes, con el `+`, la lista no
+  coincidía nunca con la identidad que manda el CRM (solo dígitos) y Nea no
+  le contestaba ni al dueño en modo prueba. Hallado en el ensayo del starter
+  3.0.0.
+
 ## 2.0.0 — 2026-10-20
 
 Versión mayor: **hay algo que hacer a mano al actualizar** (abajo, «Actualizar
