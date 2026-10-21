@@ -28,6 +28,7 @@ def canonical_identity(wa_id: str) -> str:
 # Un BSUID tal como lo manda Meta: país, punto y el identificador
 # (`US.13491208655302741918`). El CRM lo guarda como `bsuid:<id>`.
 _BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
+_TELEFONO_ESCRITO = re.compile(r"^\+?[\d\s().-]{7,}$")
 
 
 def _identidad_de_lista(parte: str) -> str:
@@ -37,6 +38,12 @@ def _identidad_de_lista(parte: str) -> str:
     con su prefijo `bsuid:`. En la lista vale escribirlo como lo enseña el
     CRM o pelón, como sale en el payload de Meta.
     """
+    # Un teléfono se escribe como uno quiera: «+52 1 462 …», «52-462-…». La
+    # identidad del CRM es solo dígitos (521… → 52…), y con el «+» la lista
+    # no coincidía nunca: Nea no le contestaba ni al dueño en modo prueba
+    # (ensayo del starter 3.0.0, 2026-10-21).
+    if _TELEFONO_ESCRITO.match(parte.strip()):
+        parte = re.sub(r"\D", "", parte)
     s = canonical_identity(parte)
     return f"bsuid:{s}" if _BSUID_PELON.match(s) else s
 
