@@ -4,7 +4,7 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
-## Sin publicar (será 2.0.0)
+## 2.0.0 — 2026-10-20
 
 Versión mayor: **hay algo que hacer a mano al actualizar** (abajo, «Actualizar
 desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
@@ -58,6 +58,13 @@ desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
   `LLM_TRANSCRIBE_MODEL` (un modelo que oiga, no `whisper-1`). En modo cloud
   no cambia nada.
 - `/health` gana `llm`: `"crm"` o `"propia"` (sin llaves ni URLs).
+- **Nea mueve al lead de etapa** (vocero-crm 038): la herramienta
+  `move_stage` llama a `POST /api/bot/stage`. Se le enseña al modelo solo con
+  la clave `etapa` encendida en el perfil y si el contexto trae
+  `lead.nextStages`, y solo hacia esas etapas. El prompt dice cuándo: en el
+  mismo turno de la respuesta, en cuanto el lead dijo qué necesita o pidió
+  avanzar (precio, contratar, empezar, agendar); nunca por un saludo o un
+  «ok». Contra un CRM sin la ruta, la herramienta no existe.
 
 ### Se quitó
 
@@ -75,14 +82,18 @@ desde 1.x»). Spec 031 de vocero-crm (`specs/031-nea-por-despacho`).
 
 En este orden, para no perder mensajes:
 
-1. **CRM**: `BRAIN_DISPATCH_URL=https://<nea>/vocero/dispatch` (o
-   `http://nea:8000/vocero/dispatch` en la misma red) y redeploy. `BOT_API_KEY`
-   ya lo tiene. Con el despacho activo, el agente incluido se calla solo.
+1. **CRM** (Vocero 2.0): `BRAIN_DISPATCH_URL=https://<nea>/vocero/dispatch`
+   (o `http://nea:8000/vocero/dispatch` en la misma red) y redeploy.
+   `BOT_API_KEY` ya lo tiene. Después, **enciende el agente** en la pantalla
+   Agente del CRM: desde la 2.0 ese interruptor decide si el CRM le despacha
+   a Nea.
 2. **Meta**: quita el override del número que apuntaba a Nea
    (`POST /{PHONE_NUMBER_ID}` con `"override_callback_uri": ""`). Los webhooks
    vuelven al override de la WABA, el del CRM. Compruébalo con
    `GET /{PHONE_NUMBER_ID}?fields=webhook_configuration`.
-3. **Nea**: la imagen `2.0.0`. Puedes quitar las variables de «Se quitó».
+3. **Nea**: la imagen `2.0.0`. Puedes quitar las variables de «Se quitó» y,
+   si quieres que piense con la llave de Ajustes → IA del CRM, también
+   `LLM_API_KEY`.
 
 Si haces el 3 antes que el 2, no se pierde nada: Nea le contesta 503 a Meta,
 Meta reintenta, y `/health` enseña `webhookDeMeta.ultimoEn` hasta que muevas
