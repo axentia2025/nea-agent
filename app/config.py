@@ -30,6 +30,13 @@ def canonical_identity(wa_id: str) -> str:
 _BSUID_PELON = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9]+$")
 _TELEFONO_ESCRITO = re.compile(r"^\+?[\d\s().-]{7,}$")
 
+# El que oye las notas de voz cuando el audio viaja dentro del chat (por el CRM
+# o por un proveedor compatible) y nadie eligió otro. `whisper-1` solo existe
+# en OpenAI: por esa vía hacía fallar TODA nota de voz. Medido el 22-oct-2026
+# por OpenRouter con una nota en español: transcripción literal en 1.9 s, una
+# diezmilésima de dólar.
+MODELO_QUE_OYE = "google/gemini-3.5-flash-lite"
+
 
 def _identidad_de_lista(parte: str) -> str:
     """Una entrada de ALLOWED_WA_IDS / TESTER_WA_IDS, en la forma del CRM.
@@ -237,6 +244,18 @@ class Settings(BaseSettings):
     # Desarrollo: loguear el JSON crudo de mensajes no-texto entrantes para
     # capturar los formatos reales de Meta (spec 002). Apagar al terminar.
     capture_payloads: bool = False
+
+    @property
+    def modelo_de_transcripcion(self) -> str:
+        """El modelo que transcribe de verdad.
+
+        Es `LLM_TRANSCRIBE_MODEL`, salvo que siga en `whisper-1` y el audio
+        viaje por el chat: ahí `whisper-1` no existe, así que se usa
+        `MODELO_QUE_OYE`. Quien quiera otro lo pone en la variable.
+        """
+        if self.audio_mal_configurado:
+            return MODELO_QUE_OYE
+        return self.llm_transcribe_model
 
     @property
     def audio_mal_configurado(self) -> bool:

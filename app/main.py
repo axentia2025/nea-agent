@@ -123,7 +123,7 @@ def _llm_del_arranque(settings: Settings, perfil: ProfileProvider | None) -> Any
             settings.crm_bot_api_key,
             perfil,
             model=settings.llm_model,
-            transcribe_model=settings.llm_transcribe_model,
+            transcribe_model=settings.modelo_de_transcripcion,
             reasoning_effort=settings.llm_reasoning_effort,
             provider_sort=settings.llm_provider_sort,
             timeout=settings.llm_timeout_seconds,
@@ -131,7 +131,7 @@ def _llm_del_arranque(settings: Settings, perfil: ProfileProvider | None) -> Any
     return OpenAiLlm(
         settings.llm_api_key,
         settings.llm_model,
-        transcribe_model=settings.llm_transcribe_model,
+        transcribe_model=settings.modelo_de_transcripcion,
         base_url=settings.llm_base_url or None,
         reasoning_effort=settings.llm_reasoning_effort,
         provider_sort=settings.llm_provider_sort,
@@ -224,12 +224,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         c: AppContext = app.state.ctx
 
         if c.settings.audio_mal_configurado:
-            logger.warning(
-                "el modelo se llama por un proveedor compatible (LLM_BASE_URL "
-                "o el CRM) pero LLM_TRANSCRIBE_MODEL sigue en 'whisper-1', que "
-                "solo existe en OpenAI: las notas de voz van a fallar. Pon ahí "
-                "un modelo que acepte audio (no todos oyen — los GLM, por "
-                "ejemplo, no)."
+            logger.info(
+                "LLM_TRANSCRIBE_MODEL sigue en 'whisper-1', que solo existe en "
+                "OpenAI, y aquí el audio viaja dentro del chat (LLM_BASE_URL o "
+                "el CRM): las notas de voz se transcriben con %s. Para otro, "
+                "pon en esa variable un modelo que acepte audio.",
+                c.settings.modelo_de_transcripcion,
             )
         if c.settings.piensa_por_el_crm:
             logger.info(

@@ -503,6 +503,20 @@ class TestAudio:
     def test_pensando_por_el_crm_con_whisper_avisa(self) -> None:
         assert Settings(llm_api_key="").audio_mal_configurado is True
 
+    def test_whisper_por_chat_se_cambia_por_uno_que_oye(self) -> None:
+        from app.config import MODELO_QUE_OYE
+
+        por_crm = Settings(llm_api_key="")
+        assert por_crm.modelo_de_transcripcion == MODELO_QUE_OYE
+        compatible = Settings(llm_base_url="https://openrouter.ai/api/v1")
+        assert compatible.modelo_de_transcripcion == MODELO_QUE_OYE
+
+    def test_el_modelo_elegido_se_respeta(self) -> None:
+        elegido = Settings(llm_api_key="", llm_transcribe_model="google/gemini-2.5-flash")
+        assert elegido.modelo_de_transcripcion == "google/gemini-2.5-flash"
+        # Con OpenAI, whisper-1 existe y se queda.
+        assert Settings(llm_api_key="sk-propia").modelo_de_transcripcion == "whisper-1"
+
     @respx.mock
     async def test_transcribe_pidiendo_SOLO_el_texto(self) -> None:
         # Sin esa instrucción, un modelo servicial contesta a lo que dijo el

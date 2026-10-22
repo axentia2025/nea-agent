@@ -4,6 +4,17 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
+## Sin publicar
+
+### Arreglado
+
+- **Las notas de voz se transcriben sin configurar nada.** Pensando por el CRM
+  (o con `LLM_BASE_URL`), el audio viaja dentro del chat y `whisper-1`, el
+  default de `LLM_TRANSCRIBE_MODEL`, no existe ahí: toda nota de voz fallaba y
+  Nea pedía que se la escribieran. Ahora, con `whisper-1` por esa vía, oye
+  `google/gemini-3.5-flash-lite` (≈ USD 0.0001 por nota). Un modelo puesto en
+  la variable se sigue respetando, y con OpenAI nada cambia.
+
 ## 2.0.1 — 2026-10-21
 
 ### Arreglado

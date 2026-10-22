@@ -243,7 +243,7 @@ dale a tu servidor credenciales del registro, o Coolify no podrá descargarlo.
 | `LLM_API_KEY` | Opcional. Vacía, Nea piensa por el CRM: la llave y el modelo se eligen en Ajustes → IA y Nea llama a `/api/bot/llm` con `CRM_BOT_API_KEY`. Con valor, cerebro propio con su proveedor | Piensa por el CRM; sin IA en el CRM, cada conversación pasa a una persona |
 | `LLM_BASE_URL` | Con OpenRouter, `https://openrouter.ai/api/v1` | OpenAI |
 | `LLM_MODEL` | Un modelo rápido que use herramientas. En OpenRouter lleva prefijo: `z-ai/glm-5.3-flash`. Pensando por el CRM manda el modelo de Ajustes → IA; este es el respaldo | `gpt-4o-mini` |
-| `LLM_TRANSCRIBE_MODEL` | El que oye las notas de voz. Fuera de OpenAI, uno que acepte audio: `google/gemini-2.5-flash` | `whisper-1`, que solo existe en OpenAI: con otro proveedor falla toda nota de voz |
+| `LLM_TRANSCRIBE_MODEL` | El que oye las notas de voz. Fuera de OpenAI, uno que acepte audio: `google/gemini-2.5-flash` | `whisper-1`, que solo existe en OpenAI. Con otro proveedor, o pensando por el CRM, Nea usa `google/gemini-3.5-flash-lite` |
 | `ALLOWED_WA_IDS` | Mientras pruebas, tu número (`5215512345678`) o tu identidad de Instagram (`ig:…`) | Nea le contesta a todos |
 
 `VOCERO_MODE` se queda vacía: eso es el modo estándar. Lo demás (zona horaria,
