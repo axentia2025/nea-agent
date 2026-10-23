@@ -4,7 +4,7 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
 `vX.Y.Z` publica la imagen `ghcr.io/kevinrivm/nea-agent:X.Y.Z` (README,
 «Instalar»).
 
-## Sin publicar
+## 2.0.2 — 2026-10-22
 
 ### Arreglado
 
