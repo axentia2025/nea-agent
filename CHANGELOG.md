@@ -15,6 +15,11 @@ Qué cambia en cada versión de Nea y qué hacer al actualizar. Cada tag
   `google/gemini-3.5-flash-lite` (≈ USD 0.0001 por nota). Un modelo puesto en
   la variable se sigue respetando, y con OpenAI nada cambia.
 
+### Seguridad
+
+- **`pypdf` 6.19.0 → 6.21.2**: cierra ocho CVE publicadas en octubre de 2026
+  (`pip-audit`). Es la librería que lee los PDF del conocimiento.
+
 ## 2.0.1 — 2026-10-21
 
 ### Arreglado
