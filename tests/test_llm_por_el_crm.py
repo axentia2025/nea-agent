@@ -209,6 +209,31 @@ async def test_la_nota_de_voz_va_por_el_proxy_con_el_modelo_que_oye(respx_mock):
     assert json.loads(ruta.calls[0].request.content)["model"] == "google/gemini-2.5-flash"
 
 
+async def test_sin_elegir_modelo_la_nota_de_voz_la_oye_uno_que_oye(respx_mock):
+    """Con `whisper-1` (el default) por el CRM, toda nota de voz fallaba."""
+    from app.config import MODELO_QUE_OYE
+
+    respx_mock.get(f"{CRM_URL}/api/bot/profile").mock(
+        return_value=httpx.Response(
+            200, json=_perfil({"path": "/api/bot/llm", "model": "z-ai/glm-5.3"})
+        )
+    )
+    ruta = respx_mock.post(PROXY).mock(
+        return_value=httpx.Response(200, json=_respuesta("precio del curso"))
+    )
+    ctx = make_ctx(make_settings(llm_api_key=""))
+    assert ctx.settings.llm_transcribe_model == "whisper-1"
+    llm = _cliente(ctx.settings, ProfileProvider(ctx.crm))
+    try:
+        texto = await llm.transcribe(b"ogg", "audio/ogg")
+    finally:
+        await ctx.crm.aclose()
+    assert texto == "precio del curso"
+    enviado = json.loads(ruta.calls[0].request.content)
+    assert enviado["model"] == MODELO_QUE_OYE
+    assert any(p["type"] == "input_audio" for p in enviado["messages"][0]["content"])
+
+
 # ── El CRM sin IA: el camino de fallo de siempre ──────────────────────────
 
 
