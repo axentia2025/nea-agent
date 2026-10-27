@@ -165,6 +165,43 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "crear_contacto",
+            "description": (
+                "Da de alta un nuevo contacto/prospecto en el CRM. Úsala cuando "
+                "alguien pida registrar a otra persona como prospecto. Necesitas "
+                "nombre y teléfono con código de país (ej. 5215512345678)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Nombre completo del prospecto",
+                    },
+                    "phone": {
+                        "type": "string",
+                        "description": "Teléfono con código de país, solo dígitos (ej. 5215512345678)",
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "Correo electrónico (opcional)",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Notas adicionales sobre el prospecto (opcional)",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Origen: anuncio | organico | referido | conocido | otro",
+                    },
+                },
+                "required": ["name", "phone"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "route_out",
             "description": (
                 "Marca al lead como no calificado (hoy). Después despídete con "
@@ -274,6 +311,7 @@ AGENDA_TOOLS = frozenset({"propose_slots", "book_session", "reschedule_session"}
 CLAVE_DE_HERRAMIENTA = {
     "update_ficha": "ficha",
     "move_stage": "etapa",
+    "crear_contacto": "crear_contacto",
     "propose_slots": "agendar",
     "book_session": "agendar",
     "list_bookings": "agendar",
@@ -501,6 +539,8 @@ class ToolRuntime:
                 return await self._ctx.crm.cancel_booking(self._crm_conv_id, str(args["selection_token"]), True)
             if name == "update_ficha":
                 return await self._update_ficha(args)
+            if name == "crear_contacto":
+                return await self._crear_contacto(args)
             if name == "move_stage":
                 return await self._move_stage(args)
             if name == "propose_slots":
@@ -530,6 +570,36 @@ class ToolRuntime:
             return {"ok": True, "nota": "sin campos nuevos"}
         await self._ctx.crm.put_ficha(self._crm_conv_id, ficha)
         return {"ok": True}
+
+    async def _crear_contacto(self, args: dict[str, Any]) -> dict[str, Any]:
+        name = str(args.get("name") or "").strip()
+        phone = str(args.get("phone") or "").strip()
+        if not name or not phone:
+            return {"ok": False, "error": "faltan_datos", "detalle": "necesito nombre y teléfono con código de país"}
+        import re
+        if not re.fullmatch(r"\d{7,15}", phone):
+            return {
+                "ok": False,
+                "error": "telefono_invalido",
+                "detalle": "el teléfono va en puro dígitos con código de país (ej. 5215512345678)",
+            }
+        try:
+            data = await self._ctx.crm.create_contact(
+                name=name,
+                phone=phone,
+                email=str(args["email"]).strip() if args.get("email") else None,
+                notes=str(args["notes"]).strip() if args.get("notes") else None,
+                source=str(args["source"]).strip() if args.get("source") else None,
+            )
+        except CrmConflict:
+            return {"ok": False, "error": "duplicado", "detalle": "ya existe un contacto con ese teléfono"}
+        contact = data.get("contact") or {}
+        return {
+            "ok": True,
+            "contacto": contact.get("name") or name,
+            "telefono": contact.get("phone") or phone,
+            "instrucciones": "confirma al lead que el prospecto quedó registrado",
+        }
 
     async def _move_stage(self, args: dict[str, Any]) -> dict[str, Any]:
         etapa = str(args.get("etapa") or "").strip()

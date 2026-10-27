@@ -439,6 +439,30 @@ class CrmClient:
         data: dict[str, Any] = resp.json()
         return data
 
+    async def create_contact(
+        self,
+        name: str,
+        phone: str,
+        email: str | None = None,
+        notes: str | None = None,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """Crea un contacto/prospecto en el CRM (`POST /api/bot/contacts`)."""
+        body: dict[str, Any] = {"name": name, "phone": phone}
+        if email:
+            body["email"] = email
+        if notes:
+            body["notes"] = notes
+        if source:
+            body["source"] = source
+        resp = await self._request("POST", "/api/bot/contacts", json=body)
+        if resp.status_code == 409:
+            raise CrmConflict(_conflict_code(resp), _payload(resp))
+        if resp.status_code not in (200, 201):
+            raise CrmError(f"contacts devolvió {resp.status_code}")
+        data: dict[str, Any] = resp.json()
+        return data
+
     async def post_typing(self, conversation_id: str) -> None:
         """Marca leído + "escribiendo…" (007). Best-effort: sin reintentos."""
         resp = await self._request(
